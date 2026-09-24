@@ -1,5 +1,12 @@
 *~
+__pycache__/
 *.pyc
-html/
+.venv/
 venv/
 .cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.json
+htmlcov/
+*.sarif

@@ -1,155 +1,225 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-import struct, os
-import pytest
+import os
+import struct
+import unittest
+
+from helpers import VirtualSocketTestCase, capture, load_ssh_audit, serialize_kex, write_list
+
+COOKIE = b'\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff'
+KEX_ALGS = ['curve25519-sha256@libssh.org', 'ecdh-sha2-nistp256', 'ecdh-sha2-nistp384', 'ecdh-sha2-nistp521', 'diffie-hellman-group-exchange-sha256', 'diffie-hellman-group14-sha1']  # fmt: skip
+KEY_ALGS = ['ssh-rsa', 'rsa-sha2-512', 'rsa-sha2-256', 'ssh-ed25519']
+ENC_ALGS = ['chacha20-poly1305@openssh.com', 'aes128-ctr', 'aes192-ctr', 'aes256-ctr', 'aes128-gcm@openssh.com', 'aes256-gcm@openssh.com', 'aes128-cbc', 'aes192-cbc', 'aes256-cbc']  # fmt: skip
+MAC_ALGS = ['umac-64-etm@openssh.com', 'umac-128-etm@openssh.com', 'hmac-sha2-256-etm@openssh.com', 'hmac-sha2-512-etm@openssh.com', 'hmac-sha1-etm@openssh.com', 'umac-64@openssh.com', 'umac-128@openssh.com', 'hmac-sha2-256', 'hmac-sha2-512', 'hmac-sha1']  # fmt: skip
+COMPRESSION = ['none', 'zlib@openssh.com']
 
 
-# pylint: disable=line-too-long,attribute-defined-outside-init
-class TestSSH2(object):
-	@pytest.fixture(autouse=True)
-	def init(self, ssh_audit):
-		self.ssh = ssh_audit.SSH
-		self.ssh2 = ssh_audit.SSH2
-		self.rbuf = ssh_audit.ReadBuf
-		self.wbuf = ssh_audit.WriteBuf
-		self.audit = ssh_audit.audit
-		self.AuditConf = ssh_audit.AuditConf
-	
-	def _conf(self):
-		conf = self.AuditConf('localhost', 22)
-		conf.colors = False
-		conf.batch = True
-		conf.verbose = True
-		conf.ssh1 = False
-		conf.ssh2 = True
-		return conf
-	
-	@classmethod
-	def _create_ssh2_packet(cls, payload):
-		padding = -(len(payload) + 5) % 8
-		if padding < 4:
-			padding += 8
-		plen = len(payload) + padding + 1
-		pad_bytes = b'\x00' * padding
-		data = struct.pack('>Ib', plen, padding) + payload + pad_bytes
-		return data
-	
-	def _kex_payload(self):
-		w = self.wbuf()
-		w.write(b'\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff')
-		w.write_list([u'curve25519-sha256@libssh.org', u'ecdh-sha2-nistp256', u'ecdh-sha2-nistp384', u'ecdh-sha2-nistp521', u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group14-sha1'])
-		w.write_list([u'ssh-rsa', u'rsa-sha2-512', u'rsa-sha2-256', u'ssh-ed25519'])
-		w.write_list([u'chacha20-poly1305@openssh.com', u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'aes128-cbc', u'aes192-cbc', u'aes256-cbc'])
-		w.write_list([u'chacha20-poly1305@openssh.com', u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'aes128-cbc', u'aes192-cbc', u'aes256-cbc'])
-		w.write_list([u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-sha1'])
-		w.write_list([u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-sha1'])
-		w.write_list([u'none', u'zlib@openssh.com'])
-		w.write_list([u'none', u'zlib@openssh.com'])
-		w.write_list([u''])
-		w.write_list([u''])
-		w.write_byte(False)
-		w.write_int(0)
-		return w.write_flush()
-	
-	def test_kex_read(self):
-		kex = self.ssh2.Kex.parse(self._kex_payload())
-		assert kex is not None
-		assert kex.cookie == b'\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff'
-		assert kex.kex_algorithms == [u'curve25519-sha256@libssh.org', u'ecdh-sha2-nistp256', u'ecdh-sha2-nistp384', u'ecdh-sha2-nistp521', u'diffie-hellman-group-exchange-sha256', u'diffie-hellman-group14-sha1']
-		assert kex.key_algorithms == [u'ssh-rsa', u'rsa-sha2-512', u'rsa-sha2-256', u'ssh-ed25519']
-		assert kex.client is not None
-		assert kex.server is not None
-		assert kex.client.encryption == [u'chacha20-poly1305@openssh.com', u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'aes128-cbc', u'aes192-cbc', u'aes256-cbc']
-		assert kex.server.encryption == [u'chacha20-poly1305@openssh.com', u'aes128-ctr', u'aes192-ctr', u'aes256-ctr', u'aes128-gcm@openssh.com', u'aes256-gcm@openssh.com', u'aes128-cbc', u'aes192-cbc', u'aes256-cbc']
-		assert kex.client.mac == [u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-sha1']
-		assert kex.server.mac == [u'umac-64-etm@openssh.com', u'umac-128-etm@openssh.com', u'hmac-sha2-256-etm@openssh.com', u'hmac-sha2-512-etm@openssh.com', u'hmac-sha1-etm@openssh.com', u'umac-64@openssh.com', u'umac-128@openssh.com', u'hmac-sha2-256', u'hmac-sha2-512', u'hmac-sha1']
-		assert kex.client.compression == [u'none', u'zlib@openssh.com']
-		assert kex.server.compression == [u'none', u'zlib@openssh.com']
-		assert kex.client.languages == [u'']
-		assert kex.server.languages == [u'']
-		assert kex.follows is False
-		assert kex.unused == 0
-	
-	def _get_empty_kex(self, cookie=None):
-		kex_algs, key_algs = [], []
-		enc, mac, compression, languages = [], [], ['none'], []
-		cli = self.ssh2.KexParty(enc, mac, compression, languages)
-		enc, mac, compression, languages = [], [], ['none'], []
-		srv = self.ssh2.KexParty(enc, mac, compression, languages)
-		if cookie is None:
-			cookie = os.urandom(16)
-		kex = self.ssh2.Kex(cookie, kex_algs, key_algs, cli, srv, 0)
-		return kex
-	
-	def _get_kex_variat1(self):
-		cookie = b'\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff'
-		kex = self._get_empty_kex(cookie)
-		kex.kex_algorithms.append('curve25519-sha256@libssh.org')
-		kex.kex_algorithms.append('ecdh-sha2-nistp256')
-		kex.kex_algorithms.append('ecdh-sha2-nistp384')
-		kex.kex_algorithms.append('ecdh-sha2-nistp521')
-		kex.kex_algorithms.append('diffie-hellman-group-exchange-sha256')
-		kex.kex_algorithms.append('diffie-hellman-group14-sha1')
-		kex.key_algorithms.append('ssh-rsa')
-		kex.key_algorithms.append('rsa-sha2-512')
-		kex.key_algorithms.append('rsa-sha2-256')
-		kex.key_algorithms.append('ssh-ed25519')
-		kex.server.encryption.append('chacha20-poly1305@openssh.com')
-		kex.server.encryption.append('aes128-ctr')
-		kex.server.encryption.append('aes192-ctr')
-		kex.server.encryption.append('aes256-ctr')
-		kex.server.encryption.append('aes128-gcm@openssh.com')
-		kex.server.encryption.append('aes256-gcm@openssh.com')
-		kex.server.encryption.append('aes128-cbc')
-		kex.server.encryption.append('aes192-cbc')
-		kex.server.encryption.append('aes256-cbc')
-		kex.server.mac.append('umac-64-etm@openssh.com')
-		kex.server.mac.append('umac-128-etm@openssh.com')
-		kex.server.mac.append('hmac-sha2-256-etm@openssh.com')
-		kex.server.mac.append('hmac-sha2-512-etm@openssh.com')
-		kex.server.mac.append('hmac-sha1-etm@openssh.com')
-		kex.server.mac.append('umac-64@openssh.com')
-		kex.server.mac.append('umac-128@openssh.com')
-		kex.server.mac.append('hmac-sha2-256')
-		kex.server.mac.append('hmac-sha2-512')
-		kex.server.mac.append('hmac-sha1')
-		kex.server.compression.append('zlib@openssh.com')
-		for a in kex.server.encryption:
-			kex.client.encryption.append(a)
-		for a in kex.server.mac:
-			kex.client.mac.append(a)
-		for a in kex.server.compression:
-			if a == 'none':
-				continue
-			kex.client.compression.append(a)
-		return kex
-	
-	def test_key_payload(self):
-		kex1 = self._get_kex_variat1()
-		kex2 = self.ssh2.Kex.parse(self._kex_payload())
-		assert kex1.payload == kex2.payload
-	
-	def test_ssh2_server_simple(self, output_spy, virtual_socket):
-		vsocket = virtual_socket
-		w = self.wbuf()
-		w.write_byte(self.ssh.Protocol.MSG_KEXINIT)
-		w.write(self._kex_payload())
-		vsocket.rdata.append(b'SSH-2.0-OpenSSH_7.3 ssh-audit-test\r\n')
-		vsocket.rdata.append(self._create_ssh2_packet(w.write_flush()))
-		output_spy.begin()
-		self.audit(self._conf())
-		lines = output_spy.flush()
-		assert len(lines) == 72
+def create_ssh2_packet(payload):
+    """Frame ``payload`` as an unencrypted SSH2 binary packet (RFC 4253 §6)."""
+    padding = -(len(payload) + 5) % 8
+    if padding < 4:
+        padding += 8
+    plen = len(payload) + padding + 1
+    return struct.pack('>Ib', plen, padding) + payload + b'\x00' * padding
 
-	def test_ssh2_server_invalid_first_packet(self, output_spy, virtual_socket):
-		vsocket = virtual_socket
-		w = self.wbuf()
-		w.write_byte(self.ssh.Protocol.MSG_KEXINIT + 1)
-		vsocket.rdata.append(b'SSH-2.0-OpenSSH_7.3 ssh-audit-test\r\n')
-		vsocket.rdata.append(self._create_ssh2_packet(w.write_flush()))
-		output_spy.begin()
-		with pytest.raises(SystemExit):
-			self.audit(self._conf())
-		lines = output_spy.flush()
-		assert len(lines) == 3
-		assert 'unknown message' in lines[-1]
+
+def kex_payload(kex=KEX_ALGS, key=KEY_ALGS, enc=ENC_ALGS, mac=MAC_ALGS, compression=COMPRESSION):
+    """KEXINIT payload (no message-type byte) offering the same lists in both directions.
+
+    Module-level so other test modules build servers from it directly instead
+    of instantiating TestSSH2 or faking its ``self``.
+    """
+    w = load_ssh_audit().WriteBuf()
+    w.write(COOKIE)
+    for algs in (kex, key, enc, enc, mac, mac, compression, compression, [''], ['']):
+        write_list(w, algs)
+    w.write_byte(False)
+    w.write_int(0)
+    return w.write_flush()
+
+
+class TestSSH2(VirtualSocketTestCase):
+    def setUp(self):
+        super().setUp()
+        ssh_audit = load_ssh_audit()
+        self.ssh = ssh_audit.SSH
+        self.ssh2 = ssh_audit.SSH2
+        self.wbuf = ssh_audit.WriteBuf
+        self.audit = ssh_audit.audit
+        self.AuditConf = ssh_audit.AuditConf
+
+    def _conf(self):
+        conf = self.AuditConf('localhost', 22)
+        conf.colors = False
+        conf.batch = True
+        conf.verbose = True
+        conf.ssh1 = False
+        conf.ssh2 = True
+        return conf
+
+    def _audit_server(self, banner, **algs):
+        """Audit a server sending ``banner`` and a KEXINIT built from ``algs``; return stdout lines."""
+        w = self.wbuf()
+        w.write_byte(self.ssh.Protocol.MSG_KEXINIT)
+        w.write(kex_payload(**algs))
+        self.vsocket.rdata += [banner + b'\r\n', create_ssh2_packet(w.write_flush())]
+        with capture() as output:
+            self.audit(self._conf())
+        return output['out']
+
+    def test_kex_read(self):
+        kex = self.ssh2.Kex.parse(kex_payload())
+        self.assertIsNotNone(kex)
+        self.assertEqual(kex.cookie, COOKIE)
+        self.assertEqual(kex.kex_algorithms, KEX_ALGS)
+        self.assertEqual(kex.key_algorithms, KEY_ALGS)
+        self.assertIsNotNone(kex.client)
+        self.assertIsNotNone(kex.server)
+        self.assertEqual(kex.client.encryption, ENC_ALGS)
+        self.assertEqual(kex.server.encryption, ENC_ALGS)
+        self.assertEqual(kex.client.mac, MAC_ALGS)
+        self.assertEqual(kex.server.mac, MAC_ALGS)
+        self.assertEqual(kex.client.compression, COMPRESSION)
+        self.assertEqual(kex.server.compression, COMPRESSION)
+        self.assertEqual(kex.client.languages, [''])
+        self.assertEqual(kex.server.languages, [''])
+        self.assertIs(kex.follows, False)
+        self.assertEqual(kex.unused, 0)
+
+    def _get_empty_kex(self, cookie=None):
+        cli = self.ssh2.KexParty([], [], ['none'], [])
+        srv = self.ssh2.KexParty([], [], ['none'], [])
+        if cookie is None:
+            cookie = os.urandom(16)
+        return self.ssh2.Kex(cookie, [], [], cli, srv, 0)
+
+    def _get_kex_variat1(self):
+        kex = self._get_empty_kex(COOKIE)
+        kex.kex_algorithms.extend(KEX_ALGS)
+        kex.key_algorithms.extend(KEY_ALGS)
+        kex.server.encryption.extend(ENC_ALGS)
+        kex.server.mac.extend(MAC_ALGS)
+        kex.server.compression.append('zlib@openssh.com')
+        kex.client.encryption.extend(kex.server.encryption)
+        kex.client.mac.extend(kex.server.mac)
+        kex.client.compression.extend(a for a in kex.server.compression if a != 'none')
+        return kex
+
+    def test_key_payload(self):
+        kex1 = self._get_kex_variat1()
+        kex2 = self.ssh2.Kex.parse(kex_payload())
+        self.assertEqual(serialize_kex(kex1), serialize_kex(kex2))
+        self.assertEqual(serialize_kex(kex1), kex_payload())
+
+    def _serve(self, payload):
+        self.vsocket.rdata.append(b'SSH-2.0-OpenSSH_7.3 ssh-audit-test\r\n')
+        self.vsocket.rdata.append(create_ssh2_packet(payload))
+
+    def test_ssh2_server_simple(self):
+        w = self.wbuf()
+        w.write_byte(self.ssh.Protocol.MSG_KEXINIT)
+        w.write(kex_payload())
+        self._serve(w.write_flush())
+        with capture() as output:
+            self.audit(self._conf())
+        lines = output['out']
+        self.assertEqual(len(lines), 75)
+        self.assertEqual(output['err'], [])
+        self.assertTrue(self.vsocket.closed, 'socket left open after a completed audit')
+        self.assertEqual(lines[:4], [
+            '(gen) banner: SSH-2.0-OpenSSH_7.3 ssh-audit-test',
+            '(gen) software: OpenSSH 7.3',
+            '(gen) compatibility: OpenSSH 7.2+ (some functionality from 6.6), Dropbear SSH 2020.79+',
+            '(gen) compression: enabled (zlib@openssh.com)',
+        ])  # fmt: skip
+        self.assertIn('(kex) ecdh-sha2-nistp256 -- [fail] using elliptic curves that are suspected as being backdoored by the U.S. National Security Agency', lines)  # fmt: skip
+        self.assertIn('(key) ssh-rsa -- [fail] using broken SHA-1 hash algorithm', lines)
+        self.assertIn('(enc) aes128-cbc -- [warn] using weak cipher mode', lines)
+        self.assertIn('(rec) -aes128-cbc-- enc algorithm to remove ', lines)
+        self.assertIn('(rec) -ssh-rsa-- key algorithm to remove ', lines)
+        # every kex offered has a fault and OpenSSH 7.3 supports no fault-free one,
+        # so the least-faulty ones are kept rather than advising removal of all
+        recs = [line for line in lines if line.startswith('(rec)')]
+        self.assertNotIn('(rec) -curve25519-sha256@libssh.org-- kex algorithm to remove ', recs)
+        self.assertNotIn(
+            '(rec) -diffie-hellman-group-exchange-sha256-- kex algorithm to remove ', recs
+        )
+        self.assertFalse(any(line.startswith('(rec) +') for line in recs), recs)
+
+    def test_no_version_based_cve_output(self):
+        # CVE matching by banner version was removed: distro backports made it wrong.
+        w = self.wbuf()
+        w.write_byte(self.ssh.Protocol.MSG_KEXINIT)
+        w.write(kex_payload())
+        self.vsocket.rdata.append(b'SSH-2.0-libssh-0.7.2\r\n')
+        self.vsocket.rdata.append(create_ssh2_packet(w.write_flush()))
+        with capture() as output:
+            self.audit(self._conf())
+        self.assertFalse([line for line in output['out'] if line.startswith(('(cve)', '(sec)'))])
+
+    def test_unknown_unversioned_and_empty_algorithm_names(self):
+        lines = self._audit_server(
+            b'SSH-2.0-OpenSSH_9.6',
+            kex=['vendor-kex@example.com', 'curve25519-sha256'],
+            key=['ssh-rsa-sha2-256'],
+            enc=['aes128-ctr'],
+            mac=[''],
+            compression=['none'],
+        )
+        self.assertIn('(gen) compression: disabled', lines)
+        self.assertIn('(kex) vendor-kex@example.com -- [warn] unknown algorithm', lines)
+        # an algorithm with no notes and no version data still gets a line
+        self.assertIn('(key) ssh-rsa-sha2-256 -- [info] ', lines)
+        # an empty MAC list prints no MAC section at all
+        self.assertFalse([line for line in lines if line.startswith('(mac)')])
+        # the unknown algorithm is ignored when working out compatibility
+        self.assertIn('(gen) compatibility: OpenSSH 7.4+, Dropbear SSH 2018.76+', lines)
+
+    def test_recommendations_append_and_skip_types_without_advice(self):
+        lines = self._audit_server(
+            b'SSH-2.0-OpenSSH_10.0',
+            kex=['curve25519-sha256'],
+            key=['ssh-ed25519'],
+            enc=['chacha20-poly1305@openssh.com'],
+            mac=['hmac-sha2-512-etm@openssh.com'],
+        )
+        recs = [line for line in lines if line.startswith('(rec)')]
+        self.assertIn('(rec) +mlkem768x25519-sha256-- kex algorithm to append ', recs)
+        self.assertIn('(rec) -curve25519-sha256-- kex algorithm to remove ', recs)
+        # unknown software: removals only, and only for types with a faulty algorithm
+        self.vsocket.rdata.clear()
+        lines = self._audit_server(
+            b'SSH-2.0-VendorSSH_1.0',
+            kex=['ecdh-sha2-nistp256', 'mlkem768x25519-sha256'],
+            key=['ssh-ed25519'],
+            enc=['chacha20-poly1305@openssh.com'],
+            mac=['hmac-sha2-512-etm@openssh.com'],
+        )
+        recs = [line for line in lines if line.startswith('(rec)')]
+        self.assertEqual(recs, ['(rec) -ecdh-sha2-nistp256-- kex algorithm to remove '])
+
+    def test_recommended_names_longer_than_offered_ones_stay_aligned(self):
+        # Appended names come from the database and can outgrow the offered-name padding.
+        w = self.wbuf()
+        w.write_byte(self.ssh.Protocol.MSG_KEXINIT)
+        w.write(kex_payload(kex=['curve25519-sha256'], key=['ssh-ed25519'], enc=['aes128-ctr'], mac=['hmac-sha1']))  # fmt: skip
+        self.vsocket.rdata += [b'SSH-2.0-OpenSSH_9.6\r\n', create_ssh2_packet(w.write_flush())]
+        conf = self._conf()
+        conf.batch, conf.verbose = False, False
+        with capture() as output:
+            self.audit(conf)
+        recs = [line for line in output['out'] if line.startswith('(rec)')]
+        self.assertIn('(rec) +sntrup761x25519-sha512@openssh.com -- kex algorithm to append ', recs)
+        self.assertEqual(len({line.index(' -- ') for line in recs}), 1, recs)
+
+    def test_ssh2_server_invalid_first_packet(self):
+        w = self.wbuf()
+        w.write_byte(self.ssh.Protocol.MSG_KEXINIT + 1)
+        self._serve(w.write_flush())
+        with self.assertRaises(SystemExit), capture() as output:
+            self.audit(self._conf())
+        lines = output['out'] + output['err']
+        self.assertEqual(len(lines), 3)
+        self.assertIn('unknown message', lines[-1])
+
+
+if __name__ == '__main__':
+    unittest.main()

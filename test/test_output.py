@@ -1,175 +1,150 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from __future__ import print_function
-import pytest
+import os
+import sys
+import unittest
+from unittest import mock
+
+from helpers import capture, load_ssh_audit
+
+LEVELS = ['info', 'head', 'good', 'warn', 'fail']
 
 
-# pylint: disable=attribute-defined-outside-init
-class TestOutput(object):
-	@pytest.fixture(autouse=True)
-	def init(self, ssh_audit):
-		self.Output = ssh_audit.Output
-		self.OutputBuffer = ssh_audit.OutputBuffer
-	
-	def test_output_buffer_no_lines(self, output_spy):
-		output_spy.begin()
-		with self.OutputBuffer() as obuf:
-			pass
-		assert output_spy.flush() == []
-		output_spy.begin()
-		with self.OutputBuffer() as obuf:
-			pass
-		obuf.flush()
-		assert output_spy.flush() == []
-	
-	def test_output_buffer_no_flush(self, output_spy):
-		output_spy.begin()
-		with self.OutputBuffer():
-			print(u'abc')
-		assert output_spy.flush() == []
-	
-	def test_output_buffer_flush(self, output_spy):
-		output_spy.begin()
-		with self.OutputBuffer() as obuf:
-			print(u'abc')
-			print()
-			print(u'def')
-		obuf.flush()
-		assert output_spy.flush() == [u'abc', u'', u'def']
-	
-	def test_output_defaults(self):
-		out = self.Output()
-		# default: on
-		assert out.batch is False
-		assert out.colors is True
-		assert out.minlevel == 'info'
-	
-	def test_output_colors(self, output_spy):
-		out = self.Output()
-		# test without colors
-		out.colors = False
-		output_spy.begin()
-		out.info('info color')
-		assert output_spy.flush() == [u'info color']
-		output_spy.begin()
-		out.head('head color')
-		assert output_spy.flush() == [u'head color']
-		output_spy.begin()
-		out.good('good color')
-		assert output_spy.flush() == [u'good color']
-		output_spy.begin()
-		out.warn('warn color')
-		assert output_spy.flush() == [u'warn color']
-		output_spy.begin()
-		out.fail('fail color')
-		assert output_spy.flush() == [u'fail color']
-		if not out.colors_supported:
-			return
-		# test with colors
-		out.colors = True
-		output_spy.begin()
-		out.info('info color')
-		assert output_spy.flush() == [u'info color']
-		output_spy.begin()
-		out.head('head color')
-		assert output_spy.flush() == [u'\x1b[0;36mhead color\x1b[0m']
-		output_spy.begin()
-		out.good('good color')
-		assert output_spy.flush() == [u'\x1b[0;32mgood color\x1b[0m']
-		output_spy.begin()
-		out.warn('warn color')
-		assert output_spy.flush() == [u'\x1b[0;33mwarn color\x1b[0m']
-		output_spy.begin()
-		out.fail('fail color')
-		assert output_spy.flush() == [u'\x1b[0;31mfail color\x1b[0m']
-	
-	def test_output_sep(self, output_spy):
-		out = self.Output()
-		output_spy.begin()
-		out.sep()
-		out.sep()
-		out.sep()
-		assert output_spy.flush() == [u'', u'', u'']
-	
-	def test_output_levels(self):
-		out = self.Output()
-		assert out.getlevel('info') == 0
-		assert out.getlevel('good') == 0
-		assert out.getlevel('warn') == 1
-		assert out.getlevel('fail') == 2
-		assert out.getlevel('unknown') > 2
-	
-	def test_output_minlevel_property(self):
-		out = self.Output()
-		out.minlevel = 'info'
-		assert out.minlevel == 'info'
-		out.minlevel = 'good'
-		assert out.minlevel == 'info'
-		out.minlevel = 'warn'
-		assert out.minlevel == 'warn'
-		out.minlevel = 'fail'
-		assert out.minlevel == 'fail'
-		out.minlevel = 'invalid level'
-		assert out.minlevel == 'unknown'
-	
-	def test_output_minlevel(self, output_spy):
-		out = self.Output()
-		# visible: all
-		out.minlevel = 'info'
-		output_spy.begin()
-		out.info('info color')
-		out.head('head color')
-		out.good('good color')
-		out.warn('warn color')
-		out.fail('fail color')
-		assert len(output_spy.flush()) == 5
-		# visible: head, warn, fail
-		out.minlevel = 'warn'
-		output_spy.begin()
-		out.info('info color')
-		out.head('head color')
-		out.good('good color')
-		out.warn('warn color')
-		out.fail('fail color')
-		assert len(output_spy.flush()) == 3
-		# visible: head, fail
-		out.minlevel = 'fail'
-		output_spy.begin()
-		out.info('info color')
-		out.head('head color')
-		out.good('good color')
-		out.warn('warn color')
-		out.fail('fail color')
-		assert len(output_spy.flush()) == 2
-		# visible: head
-		out.minlevel = 'invalid level'
-		output_spy.begin()
-		out.info('info color')
-		out.head('head color')
-		out.good('good color')
-		out.warn('warn color')
-		out.fail('fail color')
-		assert len(output_spy.flush()) == 1
-	
-	def test_output_batch(self, output_spy):
-		out = self.Output()
-		# visible: all
-		output_spy.begin()
-		out.minlevel = 'info'
-		out.batch = False
-		out.info('info color')
-		out.head('head color')
-		out.good('good color')
-		out.warn('warn color')
-		out.fail('fail color')
-		assert len(output_spy.flush()) == 5
-		# visible: all except head
-		output_spy.begin()
-		out.minlevel = 'info'
-		out.batch = True
-		out.info('info color')
-		out.head('head color')
-		out.good('good color')
-		out.warn('warn color')
-		out.fail('fail color')
-		assert len(output_spy.flush()) == 4
+class TestOutput(unittest.TestCase):
+    def setUp(self):
+        ssh_audit = load_ssh_audit()
+        self.Output = ssh_audit.Output
+        self.OutputBuffer = ssh_audit.OutputBuffer
+
+    def _emit_all(self, out):
+        """Emit one line per level and return the captured stdout lines."""
+        with capture() as output:
+            for level in LEVELS:
+                getattr(out, level)(f'{level} color')
+        return output['out']
+
+    def test_output_buffer_no_lines(self):
+        with capture() as output, self.OutputBuffer():
+            pass
+        self.assertEqual(output['out'], [])
+        with capture() as output:
+            with self.OutputBuffer() as obuf:
+                pass
+            obuf.flush()
+        self.assertEqual(output['out'], [])
+
+    def test_output_buffer_no_flush(self):
+        with capture() as output, self.OutputBuffer():
+            print('abc')
+        self.assertEqual(output['out'], [])
+
+    def test_output_buffer_flush(self):
+        with capture() as output:
+            with self.OutputBuffer() as obuf:
+                print('abc')
+                print()
+                print('def')
+            obuf.flush()
+        self.assertEqual(output['out'], ['abc', '', 'def'])
+
+    def test_output_defaults(self):
+        out = self.Output()
+        self.assertIs(out.batch, False)
+        self.assertIs(out.colors, True)
+        self.assertEqual(out.minlevel, 'info')
+
+    def test_output_colors(self):
+        out = self.Output()
+        out.colors = False
+        for level in LEVELS:
+            with capture() as output:
+                getattr(out, level)(f'{level} color')
+            self.assertEqual(output['out'], [f'{level} color'])
+        out.colors = True
+        expected = {
+            'info': 'info color',
+            'head': '\x1b[0;36mhead color\x1b[0m',
+            'good': '\x1b[0;32mgood color\x1b[0m',
+            'warn': '\x1b[0;33mwarn color\x1b[0m',
+            'fail': '\x1b[0;31mfail color\x1b[0m',
+        }
+        with mock.patch.object(self.Output, 'colors_supported', True):
+            for level in LEVELS:
+                with capture() as output:
+                    getattr(out, level)(f'{level} color')
+                self.assertEqual(output['out'], [expected[level]])
+
+    def test_colors_supported_only_on_a_terminal(self):
+        out = self.Output()
+        tty = mock.Mock(isatty=mock.Mock(return_value=True))
+        pipe = mock.Mock(isatty=mock.Mock(return_value=False))
+        # Colour is POSIX-only, so a terminal supports it only there; asserting a
+        # bare True would fail on the Windows CI leg.
+        on_tty = os.name == 'posix'
+        with mock.patch.object(sys, 'stdout', pipe), mock.patch.dict(os.environ, clear=True):
+            self.assertIs(out.colors_supported, False)
+        with mock.patch.object(sys, 'stdout', tty), mock.patch.dict(os.environ, clear=True):
+            self.assertIs(out.colors_supported, on_tty)
+        with mock.patch.object(sys, 'stdout', tty), mock.patch.dict(os.environ, {'NO_COLOR': '1'}):
+            self.assertIs(out.colors_supported, False)
+        # no-color.org: only a non-empty NO_COLOR disables colour
+        with mock.patch.object(sys, 'stdout', tty), mock.patch.dict(os.environ, {'NO_COLOR': ''}):
+            self.assertIs(out.colors_supported, on_tty)
+
+    def test_error_goes_to_stderr_at_any_level(self):
+        out = self.Output()
+        out.minlevel = 'invalid level'
+        out.colors = False
+        with capture() as output:
+            out.error('[exception] boom\x1b')
+        self.assertEqual(output['out'], [])
+        self.assertEqual(output['err'], ['[exception] boom\\x1b'])
+
+    def test_escape_ignores_unknown_stream_encoding(self):
+        stream = mock.Mock(encoding='no-such-codec')
+        self.assertEqual(self.Output.escape('a\x1bb', stream), 'a\\x1bb')
+
+    def test_output_sep(self):
+        out = self.Output()
+        with capture() as output:
+            out.sep()
+            out.sep()
+            out.sep()
+        self.assertEqual(output['out'], ['', '', ''])
+
+    def test_output_levels(self):
+        out = self.Output()
+        self.assertEqual(out.getlevel('info'), 0)
+        self.assertEqual(out.getlevel('good'), 0)
+        self.assertEqual(out.getlevel('warn'), 1)
+        self.assertEqual(out.getlevel('fail'), 2)
+        self.assertGreater(out.getlevel('unknown'), 2)
+
+    def test_output_minlevel_property(self):
+        out = self.Output()
+        for name, expected in [
+            ('info', 'info'),
+            ('good', 'info'),
+            ('warn', 'warn'),
+            ('fail', 'fail'),
+            ('invalid level', 'unknown'),
+        ]:
+            out.minlevel = name
+            self.assertEqual(out.minlevel, expected)
+
+    def test_output_minlevel(self):
+        out = self.Output()
+        # info: all visible; warn: head, warn, fail; fail: head, fail; invalid: head
+        for minlevel, visible in [('info', 5), ('warn', 3), ('fail', 2), ('invalid level', 1)]:
+            out.minlevel = minlevel
+            self.assertEqual(len(self._emit_all(out)), visible, minlevel)
+
+    def test_output_batch(self):
+        out = self.Output()
+        out.minlevel = 'info'
+        out.batch = False
+        self.assertEqual(len(self._emit_all(out)), 5)
+        out.batch = True
+        self.assertEqual(len(self._emit_all(out)), 4)
+
+
+if __name__ == '__main__':
+    unittest.main()

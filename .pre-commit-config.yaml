@@ -1,0 +1,42 @@
+# Hooks for prek (https://prek.j178.dev). Install with `prek install`;
+# run everything with `prek run --all-files`.
+repos:
+  - repo: builtin
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-executables-have-shebangs
+      - id: check-merge-conflict
+      - id: check-shebang-scripts-are-executable
+      - id: check-toml
+      - id: check-yaml
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+
+  # Hook repos are pinned to commit SHAs, like the actions in ci.yml: the lint
+  # job runs this code, and a tag can be moved to point at another commit.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: 2eeb5678de71a00c0902cbda7105d328432f72cb # frozen: v0.16.8
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: 7ff8d35ae36a7d2b968f2f90b4c723e292e594ee # frozen: v2.3.1
+    hooks:
+      - id: mypy
+        files: ^ssh-audit\.py$
+
+  - repo: local
+    hooks:
+      - id: unittest
+        name: unittest
+        entry: python3 -W error -m unittest discover -s test
+        language: system
+        pass_filenames: false
+        types: [python]

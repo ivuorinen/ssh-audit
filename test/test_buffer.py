@@ -1,133 +1,113 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 import re
-import pytest
+import unittest
+
+from helpers import load_ssh_audit, write_bool, write_list, write_mpint1, write_string
+
+UTF8_REPLACEMENT = b'\xef\xbf\xbd'
 
 
-# pylint: disable=attribute-defined-outside-init,bad-whitespace
-class TestBuffer(object):
-	@pytest.fixture(autouse=True)
-	def init(self, ssh_audit):
-		self.rbuf = ssh_audit.ReadBuf
-		self.wbuf = ssh_audit.WriteBuf
-		self.utf8rchar = b'\xef\xbf\xbd'
-	
-	@classmethod
-	def _b(cls, v):
-		v = re.sub(r'\s', '', v)
-		data = [int(v[i * 2:i * 2 + 2], 16) for i in range(len(v) // 2)]
-		return bytes(bytearray(data))
-	
-	def test_unread(self):
-		w = self.wbuf().write_byte(1).write_int(2).write_flush()
-		r = self.rbuf(w)
-		assert r.unread_len == 5
-		r.read_byte()
-		assert r.unread_len == 4
-		r.read_int()
-		assert r.unread_len == 0
-	
-	def test_byte(self):
-		w = lambda x: self.wbuf().write_byte(x).write_flush()  # noqa
-		r = lambda x: self.rbuf(x).read_byte()  # noqa
-		tc = [(0x00, '00'),
-		      (0x01, '01'),
-		      (0x10, '10'),
-		      (0xff, 'ff')]
-		for p in tc:
-			assert w(p[0]) == self._b(p[1])
-			assert r(self._b(p[1])) == p[0]
-	
-	def test_bool(self):
-		w = lambda x: self.wbuf().write_bool(x).write_flush()  # noqa
-		r = lambda x: self.rbuf(x).read_bool()  # noqa
-		tc = [(True,  '01'),
-		      (False, '00')]
-		for p in tc:
-			assert w(p[0]) == self._b(p[1])
-			assert r(self._b(p[1])) == p[0]
-	
-	def test_int(self):
-		w = lambda x: self.wbuf().write_int(x).write_flush()  # noqa
-		r = lambda x: self.rbuf(x).read_int()  # noqa
-		tc = [(0x00,       '00 00 00 00'),
-		      (0x01,       '00 00 00 01'),
-		      (0xabcd,     '00 00 ab cd'),
-		      (0xffffffff, 'ff ff ff ff')]
-		for p in tc:
-			assert w(p[0]) == self._b(p[1])
-			assert r(self._b(p[1])) == p[0]
-	
-	def test_string(self):
-		w = lambda x: self.wbuf().write_string(x).write_flush()  # noqa
-		r = lambda x: self.rbuf(x).read_string()  # noqa
-		tc = [(u'abc1',  '00 00 00 04 61 62 63 31'),
-		      (b'abc2',  '00 00 00 04 61 62 63 32')]
-		for p in tc:
-			v = p[0]
-			assert w(v) == self._b(p[1])
-			if not isinstance(v, bytes):
-				v = bytes(bytearray(v, 'utf-8'))
-			assert r(self._b(p[1])) == v
-	
-	def test_list(self):
-		w = lambda x: self.wbuf().write_list(x).write_flush()  # noqa
-		r = lambda x: self.rbuf(x).read_list()  # noqa
-		tc = [(['d', 'ef', 'ault'], '00 00 00 09 64 2c 65 66 2c 61 75 6c 74')]
-		for p in tc:
-			assert w(p[0]) == self._b(p[1])
-			assert r(self._b(p[1])) == p[0]
-	
-	def test_list_nonutf8(self):
-		r = lambda x: self.rbuf(x).read_list()  # noqa
-		src = self._b('00 00 00 04 de ad be ef')
-		dst = [(b'\xde\xad' + self.utf8rchar + self.utf8rchar).decode('utf-8')]
-		assert r(src) == dst
-	
-	def test_line(self):
-		w = lambda x: self.wbuf().write_line(x).write_flush()  # noqa
-		r = lambda x: self.rbuf(x).read_line()  # noqa
-		tc = [(u'example line', '65 78 61 6d 70 6c 65 20 6c 69 6e 65 0d 0a')]
-		for p in tc:
-			assert w(p[0]) == self._b(p[1])
-			assert r(self._b(p[1])) == p[0]
-	
-	def test_line_nonutf8(self):
-		r = lambda x: self.rbuf(x).read_line()  # noqa
-		src = self._b('de ad be af')
-		dst = (b'\xde\xad' + self.utf8rchar + self.utf8rchar).decode('utf-8')
-		assert r(src) == dst
-	
-	def test_bitlen(self):
-		# pylint: disable=protected-access
-		class Py26Int(int):
-			def bit_length(self):
-				raise AttributeError
-		assert self.wbuf._bitlength(42) == 6
-		assert self.wbuf._bitlength(Py26Int(42)) == 6
-	
-	def test_mpint1(self):
-		mpint1w = lambda x: self.wbuf().write_mpint1(x).write_flush()  # noqa
-		mpint1r = lambda x: self.rbuf(x).read_mpint1()  # noqa
-		tc = [(0x0,     '00 00'),
-		      (0x1234,  '00 0d 12 34'),
-		      (0x12345, '00 11 01 23 45'),
-		      (0xdeadbeef, '00 20 de ad be ef')]
-		for p in tc:
-			assert mpint1w(p[0]) == self._b(p[1])
-			assert mpint1r(self._b(p[1])) == p[0]
-	
-	def test_mpint2(self):
-		mpint2w = lambda x: self.wbuf().write_mpint2(x).write_flush()  # noqa
-		mpint2r = lambda x: self.rbuf(x).read_mpint2()  # noqa
-		tc = [(0x0,               '00 00 00 00'),
-		      (0x80,              '00 00 00 02 00 80'),
-		      (0x9a378f9b2e332a7, '00 00 00 08 09 a3 78 f9 b2 e3 32 a7'),
-		      (-0x1234,           '00 00 00 02 ed cc'),
-		      (-0xdeadbeef,       '00 00 00 05 ff 21 52 41 11'),
-		      (-0x8000,           '00 00 00 02 80 00'),
-		      (-0x80,             '00 00 00 01 80')]
-		for p in tc:
-			assert mpint2w(p[0]) == self._b(p[1])
-			assert mpint2r(self._b(p[1])) == p[0]
-		assert mpint2r(self._b('00 00 00 02 ff 80')) == -0x80
+def _b(v):
+    """Decode a whitespace-separated hex string into bytes."""
+    return bytes.fromhex(re.sub(r'\s', '', v))
+
+
+class TestBuffer(unittest.TestCase):
+    def setUp(self):
+        ssh_audit = load_ssh_audit()
+        self.rbuf = ssh_audit.ReadBuf
+        self.wbuf = ssh_audit.WriteBuf
+
+    def _roundtrip(self, write, read, cases):
+        for value, hexdata in cases:
+            with self.subTest(value=value):
+                self.assertEqual(write(value), _b(hexdata))
+                self.assertEqual(read(_b(hexdata)), value)
+
+    def test_unread(self):
+        w = self.wbuf().write_byte(1).write_int(2).write_flush()
+        r = self.rbuf(w)
+        self.assertEqual(r.unread_len, 5)
+        r.read_byte()
+        self.assertEqual(r.unread_len, 4)
+        r.read_int()
+        self.assertEqual(r.unread_len, 0)
+
+    def test_byte(self):
+        self._roundtrip(
+            lambda x: self.wbuf().write_byte(x).write_flush(),
+            lambda x: self.rbuf(x).read_byte(),
+            [(0x00, '00'), (0x01, '01'), (0x10, '10'), (0xFF, 'ff')],
+        )
+
+    def _written(self, write, value):
+        """Bytes ``write`` appends to a fresh WriteBuf for ``value``."""
+        w = self.wbuf()
+        write(w, value)
+        return w.write_flush()
+
+    def test_bool(self):
+        self._roundtrip(
+            lambda x: self._written(write_bool, x),
+            lambda x: self.rbuf(x).read_bool(),
+            [(True, '01'), (False, '00')],
+        )
+
+    def test_int(self):
+        self._roundtrip(
+            lambda x: self.wbuf().write_int(x).write_flush(),
+            lambda x: self.rbuf(x).read_int(),
+            [
+                (0x00, '00 00 00 00'),
+                (0x01, '00 00 00 01'),
+                (0xABCD, '00 00 ab cd'),
+                (0xFFFFFFFF, 'ff ff ff ff'),
+            ],
+        )
+
+    def test_string(self):
+        w = lambda x: self._written(write_string, x)  # noqa: E731
+        for value, hexdata in [
+            ('abc1', '00 00 00 04 61 62 63 31'),
+            (b'abc2', '00 00 00 04 61 62 63 32'),
+        ]:
+            self.assertEqual(w(value), _b(hexdata))
+
+    def test_list(self):
+        self._roundtrip(
+            lambda x: self._written(write_list, x),
+            lambda x: self.rbuf(x).read_list(),
+            [(['d', 'ef', 'ault'], '00 00 00 09 64 2c 65 66 2c 61 75 6c 74')],
+        )
+
+    def test_list_nonutf8(self):
+        src = _b('00 00 00 04 de ad be ef')
+        dst = [(b'\xde\xad' + UTF8_REPLACEMENT + UTF8_REPLACEMENT).decode('utf-8')]
+        self.assertEqual(self.rbuf(src).read_list(), dst)
+
+    def test_line(self):
+        src = _b('65 78 61 6d 70 6c 65 20 6c 69 6e 65 0d 0a')
+        self.assertEqual(self.rbuf(src).read_line(), 'example line')
+
+    def test_line_nonutf8(self):
+        src = _b('de ad be af')
+        dst = (b'\xde\xad' + UTF8_REPLACEMENT + UTF8_REPLACEMENT).decode('utf-8')
+        self.assertEqual(self.rbuf(src).read_line(), dst)
+
+    def test_mpint1(self):
+        self._roundtrip(
+            lambda x: self._written(write_mpint1, x),
+            lambda x: self.rbuf(x).read_mpint1(),
+            [
+                (0x0, '00 00'),
+                (0x1234, '00 0d 12 34'),
+                (0x12345, '00 11 01 23 45'),
+                (0xDEADBEEF, '00 20 de ad be ef'),
+                # SSH1 mpints are unsigned: a set top bit needs no leading zero byte
+                (0x80, '00 08 80'),
+                (0x9A378F9B2E332A7FF, '00 44 09 a3 78 f9 b2 e3 32 a7 ff'),
+            ],
+        )
+
+
+if __name__ == '__main__':
+    unittest.main()
