@@ -21,7 +21,7 @@ security fixes without changing that version (see [jtesta/ssh-audit#240](https:/
 
 ## Usage
 ```
-usage: ssh-audit.py [-1246pbnvl] <host>
+usage: ssh-audit.py [-h1246pbnvl] <host>
 
    -h,  --help             print this help
    -1,  --ssh1             force ssh version 1 only
@@ -35,14 +35,60 @@ usage: ssh-audit.py [-1246pbnvl] <host>
    -l,  --level=<level>    minimum output level (info|warn|fail)
 
 ```
+* `<host>` is `host`, `host:port`, an IPv6 address (`2001:db8::1`), or `[2001:db8::1]:port`; `-p` overrides a port given in `<host>`.
 * if both IPv4 and IPv6 are used, order of precedence can be set by using either `-46` or `-64`.
 * batch flag `-b` will output sections without header and without empty lines (implies verbose flag).
 * verbose flag `-v` will prefix each line with section type and algorithm name.
-* errors are written to stderr and exit with status 1.
-* colors are used only when stdout is a terminal; set `NO_COLOR` or pass `-n` to disable them.
+* errors are written to stderr and exit with status 1; `-h` exits with status 0. A command-line error writes the usage text to stderr too.
+* colors are used only on POSIX terminals: report lines when stdout is a terminal, errors when stderr is. Set a non-empty `NO_COLOR` or pass `-n` to disable them.
 
 ### example
-![screenshot](https://cloud.githubusercontent.com/assets/7356025/19233757/3e09b168-8ef0-11e6-91b4-e880bacd0b8a.png)
+```
+$ ./ssh-audit.py 192.0.2.10
+# general
+(gen) banner: SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13
+(gen) software: OpenSSH 9.6p1
+(gen) compatibility: OpenSSH 8.5+, Dropbear SSH 2020.79+
+(gen) compression: enabled (zlib@openssh.com)
+
+# key exchange algorithms
+(kex) sntrup761x25519-sha512@openssh.com  -- [info] available since OpenSSH 8.5
+                                          └─ [info] default key exchange from OpenSSH 9.0 to 9.8
+                                          └─ [info] hybrid key exchange based on post-quantum resistant algorithm and proven conventional X25519 algorithm
+(kex) curve25519-sha256                   -- [warn] does not provide protection against post-quantum attacks
+                                          └─ [info] available since OpenSSH 7.4, Dropbear SSH 2018.76
+                                          └─ [info] default key exchange from OpenSSH 7.4 to 8.9
+(kex) ecdh-sha2-nistp256                  -- [fail] using elliptic curves that are suspected as being backdoored by the U.S. National Security Agency
+                                          └─ [warn] does not provide protection against post-quantum attacks
+                                          └─ [info] available since OpenSSH 5.7, Dropbear SSH 2013.62
+
+# host-key algorithms
+(key) rsa-sha2-512                        -- [info] available since OpenSSH 7.2
+(key) ssh-ed25519                         -- [info] available since OpenSSH 6.5, Dropbear SSH 2020.79
+
+# encryption algorithms (ciphers)
+(enc) chacha20-poly1305@openssh.com       -- [info] available since OpenSSH 6.5, Dropbear SSH 2020.79
+                                          └─ [info] default cipher since OpenSSH 6.9
+(enc) aes128-ctr                          -- [info] available since OpenSSH 3.7, Dropbear SSH 0.52
+
+# message authentication code algorithms
+(mac) hmac-sha2-256-etm@openssh.com       -- [info] available since OpenSSH 6.2
+(mac) hmac-sha1                           -- [fail] using broken SHA-1 hash algorithm
+                                          └─ [warn] using encrypt-and-MAC mode
+                                          └─ [info] available since OpenSSH 2.1.0, Dropbear SSH 0.28
+
+# algorithm recommendations (for OpenSSH 9.6)
+(rec) -curve25519-sha256                  -- kex algorithm to remove
+(rec) -ecdh-sha2-nistp256                 -- kex algorithm to remove
+(rec) +rsa-sha2-256                       -- key algorithm to append
+(rec) +aes128-gcm@openssh.com             -- enc algorithm to append
+(rec) +aes192-ctr                         -- enc algorithm to append
+(rec) +aes256-ctr                         -- enc algorithm to append
+(rec) +aes256-gcm@openssh.com             -- enc algorithm to append
+(rec) -hmac-sha1                          -- mac algorithm to remove
+(rec) +hmac-sha2-512-etm@openssh.com      -- mac algorithm to append
+(rec) +umac-128-etm@openssh.com           -- mac algorithm to append
+```
 
 ## Development
 
@@ -66,6 +112,15 @@ Coverage must stay at 100% of statements, lines and branches of `ssh-audit.py`;
 
 ## ChangeLog
 ### Unreleased
+ - recognize libssh servers, which announce themselves as `libssh_<version>`, not `libssh-<version>`
+ - prefix every pre-banner header line with `(gen) header:`, so a server cannot forge report lines
+ - exit quietly when the reader of a piped report closes it (`| head`), instead of a BrokenPipeError traceback
+ - write the usage text to stderr when the command line is wrong
+ - accept IPv6 addresses as `<host>` (bare or `[addr]:port`); reject more than one host
+ - send the client identification first and wait up to 15 s for the banner, instead of giving up after 0.7 s of server silence
+ - bound the first packet read by a 15 s deadline; say why no banner was received
+ - `-h` exits with status 0; `-n` also applies to command-line errors; an empty `NO_COLOR` no longer disables colors
+ - report XMSS host keys as a warning, not a failure; fix a crash on SSH1 servers offering no known cipher
  - require Python 3.14; remove Python 2 compatibility code and the optional colorama dependency
  - refresh the SSH2 algorithm database from jtesta/ssh-audit v3.9.0 (post-quantum key exchanges, SHA-1 and NIST-curve failures, current OpenSSH/Dropbear/libssh versions) and follow its recommendation rules
  - remove banner-version CVE and security-issue matching, which reported backport-patched servers as vulnerable

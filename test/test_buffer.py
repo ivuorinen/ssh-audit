@@ -1,7 +1,7 @@
 import re
 import unittest
 
-from helpers import load_ssh_audit
+from helpers import load_ssh_audit, write_bool, write_list, write_mpint1, write_string
 
 UTF8_REPLACEMENT = b'\xef\xbf\xbd'
 
@@ -39,9 +39,15 @@ class TestBuffer(unittest.TestCase):
             [(0x00, '00'), (0x01, '01'), (0x10, '10'), (0xFF, 'ff')],
         )
 
+    def _written(self, write, value):
+        """Bytes ``write`` appends to a fresh WriteBuf for ``value``."""
+        w = self.wbuf()
+        write(w, value)
+        return w.write_flush()
+
     def test_bool(self):
         self._roundtrip(
-            lambda x: self.wbuf().write_bool(x).write_flush(),
+            lambda x: self._written(write_bool, x),
             lambda x: self.rbuf(x).read_bool(),
             [(True, '01'), (False, '00')],
         )
@@ -59,19 +65,16 @@ class TestBuffer(unittest.TestCase):
         )
 
     def test_string(self):
-        w = lambda x: self.wbuf().write_string(x).write_flush()  # noqa: E731
-        r = lambda x: self.rbuf(x).read_string()  # noqa: E731
+        w = lambda x: self._written(write_string, x)  # noqa: E731
         for value, hexdata in [
             ('abc1', '00 00 00 04 61 62 63 31'),
             (b'abc2', '00 00 00 04 61 62 63 32'),
         ]:
             self.assertEqual(w(value), _b(hexdata))
-            expected = value if isinstance(value, bytes) else value.encode('utf-8')
-            self.assertEqual(r(_b(hexdata)), expected)
 
     def test_list(self):
         self._roundtrip(
-            lambda x: self.wbuf().write_list(x).write_flush(),
+            lambda x: self._written(write_list, x),
             lambda x: self.rbuf(x).read_list(),
             [(['d', 'ef', 'ault'], '00 00 00 09 64 2c 65 66 2c 61 75 6c 74')],
         )
@@ -92,31 +95,18 @@ class TestBuffer(unittest.TestCase):
 
     def test_mpint1(self):
         self._roundtrip(
-            lambda x: self.wbuf().write_mpint1(x).write_flush(),
+            lambda x: self._written(write_mpint1, x),
             lambda x: self.rbuf(x).read_mpint1(),
             [
                 (0x0, '00 00'),
                 (0x1234, '00 0d 12 34'),
                 (0x12345, '00 11 01 23 45'),
                 (0xDEADBEEF, '00 20 de ad be ef'),
+                # SSH1 mpints are unsigned: a set top bit needs no leading zero byte
+                (0x80, '00 08 80'),
+                (0x9A378F9B2E332A7FF, '00 44 09 a3 78 f9 b2 e3 32 a7 ff'),
             ],
         )
-
-    def test_mpint2(self):
-        self._roundtrip(
-            lambda x: self.wbuf().write_mpint2(x).write_flush(),
-            lambda x: self.rbuf(x).read_mpint2(),
-            [
-                (0x0, '00 00 00 00'),
-                (0x80, '00 00 00 02 00 80'),
-                (0x9A378F9B2E332A7, '00 00 00 08 09 a3 78 f9 b2 e3 32 a7'),
-                (-0x1234, '00 00 00 02 ed cc'),
-                (-0xDEADBEEF, '00 00 00 05 ff 21 52 41 11'),
-                (-0x8000, '00 00 00 02 80 00'),
-                (-0x80, '00 00 00 01 80'),
-            ],
-        )
-        self.assertEqual(self.rbuf(_b('00 00 00 02 ff 80')).read_mpint2(), -0x80)
 
 
 if __name__ == '__main__':

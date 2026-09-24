@@ -1,7 +1,13 @@
 import struct
 import unittest
 
-from helpers import VirtualSocketTestCase, capture, load_ssh_audit
+from helpers import (
+    VirtualSocketTestCase,
+    capture,
+    load_ssh_audit,
+    serialize_pkm,
+    write_mpint1,
+)
 
 COOKIE = b'\x88\x99\xaa\xbb\xcc\xdd\xee\xff'
 SERVER_KEY = (1024, 0x10001, 0xee6552da432e0ac2c422df1a51287507748bfe3b5e3e4fa989a8f49fdc163a17754939ef18ef8a667ea3b71036a151fcd7f5e01ceef1e4439864baf3ac569047582c69d6c128212e0980dcb3168f00d371004039983f6033cd785b8b8f85096c7d9405cbfdc664e27c966356a6b4eb6ee20ad43414b50de18b22829c1880b551)  # fmt: skip
@@ -39,9 +45,13 @@ class TestSSH1(VirtualSocketTestCase):
         w = self.wbuf()
         w.write(COOKIE)
         b, e, m = SERVER_KEY
-        w.write_int(b).write_mpint1(e).write_mpint1(m)
+        w.write_int(b)
+        write_mpint1(w, e)
+        write_mpint1(w, m)
         b, e, m = HOST_KEY
-        w.write_int(b).write_mpint1(e).write_mpint1(m)
+        w.write_int(b)
+        write_mpint1(w, e)
+        write_mpint1(w, m)
         w.write_int(2)
         w.write_int(cmask)
         w.write_int(36)
@@ -62,8 +72,8 @@ class TestSSH1(VirtualSocketTestCase):
 
     def test_fingerprint(self):
         b, e, m = HOST_KEY
-        fpd = self.wbuf._create_mpint(m, False)
-        fpd += self.wbuf._create_mpint(e, False)
+        fpd = self.wbuf._create_mpint(m)
+        fpd += self.wbuf._create_mpint(e)
         fp = self.ssh.Fingerprint(fpd)
         self.assertEqual(b, 2048)
         self.assertEqual(fp.sha256, SHA256_FP)
@@ -91,7 +101,8 @@ class TestSSH1(VirtualSocketTestCase):
     def test_pkm_payload(self):
         pkm1 = self.ssh1.PublicKeyMessage(COOKIE, SERVER_KEY, HOST_KEY, 2, 72, 36)
         pkm2 = self.ssh1.PublicKeyMessage.parse(self._pkm_payload())
-        self.assertEqual(pkm1.payload, pkm2.payload)
+        self.assertEqual(serialize_pkm(pkm1), serialize_pkm(pkm2))
+        self.assertEqual(serialize_pkm(pkm1), self._pkm_payload())
 
     def test_ssh1_server_simple(self):
         self._serve(self.ssh.Protocol.SMSG_PUBLIC_KEY)
@@ -132,6 +143,15 @@ class TestSSH1(VirtualSocketTestCase):
             self.assertIn(expected, lines)
         # a client-only version says nothing about which servers support des
         self.assertIn('(gen) compatibility: OpenSSH 1.2.2+', lines)
+
+    def test_no_known_cipher_bits_is_reported_not_crashed(self):
+        # The padding width came from max() over the offered ciphers, which raised on an empty list.
+        self._serve(self.ssh.Protocol.SMSG_PUBLIC_KEY, cmask=1 << 7)
+        with capture() as output:
+            self.audit(self._conf())
+        self.assertIn('(aut) rsa -- [info] available since OpenSSH 1.2.2', output['out'])
+        self.assertFalse([line for line in output['out'] if line.startswith('(enc)')])
+        self.assertEqual(output['err'], [])
 
     def test_falls_back_to_ssh1_when_server_rejects_ssh2(self):
         conf = self._conf()

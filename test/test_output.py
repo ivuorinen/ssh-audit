@@ -76,12 +76,18 @@ class TestOutput(unittest.TestCase):
         out = self.Output()
         tty = mock.Mock(isatty=mock.Mock(return_value=True))
         pipe = mock.Mock(isatty=mock.Mock(return_value=False))
+        # Colour is POSIX-only, so a terminal supports it only there; asserting a
+        # bare True would fail on the Windows CI leg.
+        on_tty = os.name == 'posix'
         with mock.patch.object(sys, 'stdout', pipe), mock.patch.dict(os.environ, clear=True):
             self.assertIs(out.colors_supported, False)
         with mock.patch.object(sys, 'stdout', tty), mock.patch.dict(os.environ, clear=True):
-            self.assertIs(out.colors_supported, True)
+            self.assertIs(out.colors_supported, on_tty)
         with mock.patch.object(sys, 'stdout', tty), mock.patch.dict(os.environ, {'NO_COLOR': '1'}):
             self.assertIs(out.colors_supported, False)
+        # no-color.org: only a non-empty NO_COLOR disables colour
+        with mock.patch.object(sys, 'stdout', tty), mock.patch.dict(os.environ, {'NO_COLOR': ''}):
+            self.assertIs(out.colors_supported, on_tty)
 
     def test_error_goes_to_stderr_at_any_level(self):
         out = self.Output()

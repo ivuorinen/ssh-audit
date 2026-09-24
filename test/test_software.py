@@ -89,12 +89,20 @@ class TestSoftware(unittest.TestCase):
                     '<Software(product=Dropbear SSH, version=2014.66, patch=agbn_1)>')  # fmt: skip
 
     def test_libssh_software(self):
+        # pre-0.7 releases used a hyphen
         self._check('SSH-2.0-libssh-0.2', None, 'libssh', '0.2', None,
                     'libssh 0.2', 'libssh 0.2',
                     '<Software(product=libssh, version=0.2)>')  # fmt: skip
         self._check('SSH-2.0-libssh-0.7.3', None, 'libssh', '0.7.3', None,
                     'libssh 0.7.3', 'libssh 0.7.3',
                     '<Software(product=libssh, version=0.7.3)>')  # fmt: skip
+        # what libssh actually sends: CLIENT_BANNER_SSH2 is "SSH-2.0-libssh_<version>"
+        self._check('SSH-2.0-libssh_0.9.6', None, 'libssh', '0.9.6', None,
+                    'libssh 0.9.6', 'libssh 0.9.6',
+                    '<Software(product=libssh, version=0.9.6)>')  # fmt: skip
+        self._check('SSH-2.0-libssh_0.11.1', None, 'libssh', '0.11.1', None,
+                    'libssh 0.11.1', 'libssh 0.11.1',
+                    '<Software(product=libssh, version=0.11.1)>')  # fmt: skip
 
     def test_romsshell_software(self):
         self._check('SSH-2.0-RomSShell_5.40', 'Allegro Software', 'RomSShell', '5.40', None,

@@ -5,9 +5,8 @@ import struct
 import unittest
 from unittest import mock
 
-import test_ssh2
 from helpers import VirtualSocketTestCase, capture, load_ssh_audit
-from test_ssh2 import create_ssh2_packet
+from test_ssh2 import create_ssh2_packet, kex_payload
 
 BANNER = b'SSH-2.0-OpenSSH_7.3 ssh-audit-test\r\n'
 
@@ -30,9 +29,6 @@ class TestHostileServer(VirtualSocketTestCase):
             self.sa.audit(self._conf())
         self.assertEqual(raised.exception.code, 1)
         return output['out'] + output['err']
-
-    def _kex_payload(self):
-        return test_ssh2.TestSSH2._kex_payload(mock.Mock(wbuf=self.sa.WriteBuf))
 
     def test_empty_payload_packet_is_reported(self):
         # length 4 with 3 bytes of padding leaves a zero-byte payload (no message type)
@@ -76,7 +72,7 @@ class TestHostileServer(VirtualSocketTestCase):
     def test_blank_lines_and_partial_banner_after_a_header_line(self):
         w = self.sa.WriteBuf()
         w.write_byte(self.sa.SSH.Protocol.MSG_KEXINIT)
-        w.write(self._kex_payload())
+        w.write(kex_payload())
         self.vsocket.rdata += [
             b'\r\n\r\nwelcome\nSSH-2.0-Open',
             b'SSH_7.3 ssh-audit-test\r\n',
@@ -89,6 +85,28 @@ class TestHostileServer(VirtualSocketTestCase):
             ['(gen) header: welcome', '(gen) banner: SSH-2.0-OpenSSH_7.3 ssh-audit-test'],
         )
 
+    def test_every_header_line_is_prefixed(self):
+        # Joined with newlines, every line after the first printed as bare server
+        # text, so a server could forge lines that read like audit results.
+        w = self.sa.WriteBuf()
+        w.write_byte(self.sa.SSH.Protocol.MSG_KEXINIT)
+        w.write(kex_payload())
+        self.vsocket.rdata += [
+            b'welcome\r\n(kex) mlkem768x25519-sha256 -- [info] available since OpenSSH 9.9\r\n',
+            BANNER,
+            create_ssh2_packet(w.write_flush()),
+        ]
+        with capture() as output:
+            self.sa.audit(self._conf())
+        self.assertEqual(
+            output['out'][:2],
+            [
+                '(gen) header: welcome',
+                '(gen) header: (kex) mlkem768x25519-sha256 -- [info] available since OpenSSH 9.9',
+            ],
+        )
+        self.assertFalse([line for line in output['out'] if line.startswith('(kex) mlkem')])
+
     def test_truncated_kexinit_is_reported(self):
         self.vsocket.rdata += [BANNER, create_ssh2_packet(b'\x14' + b'\x00' * 3)]
         lines = self._audit_fails()
@@ -97,7 +115,7 @@ class TestHostileServer(VirtualSocketTestCase):
     def test_banner_split_across_segments(self):
         w = self.sa.WriteBuf()
         w.write_byte(self.sa.SSH.Protocol.MSG_KEXINIT)
-        w.write(self._kex_payload())
+        w.write(kex_payload())
         self.vsocket.rdata += [
             b'SSH-2.0-Open',
             b'SSH_7.3 ssh-audit-test\r\n',
@@ -110,7 +128,7 @@ class TestHostileServer(VirtualSocketTestCase):
     def test_endless_pre_banner_lines_stop(self):
         self.vsocket.rdata += [b'x' * 100 + b'\r\n'] * 5000
         lines = self._audit_fails()
-        self.assertIn('did not receive banner', lines[-1])
+        self.assertIn('did not receive banner (too many pre-banner lines)', lines[-1])
         self.assertGreater(len(self.vsocket.rdata), 0, 'all 5000 header lines were consumed')
 
     def test_slow_pre_banner_lines_hit_deadline(self):
@@ -118,8 +136,34 @@ class TestHostileServer(VirtualSocketTestCase):
         clock = iter(range(0, 100000, 10))
         with mock.patch.object(self.sa.time, 'monotonic', side_effect=lambda: next(clock)):
             lines = self._audit_fails()
-        self.assertIn('did not receive banner', lines[-1])
+        self.assertIn('did not receive banner (timeout)', lines[-1])
         self.assertGreater(len(self.vsocket.rdata), 80)
+
+    def test_slow_partial_line_hits_deadline(self):
+        # bytes keep arriving but never complete a line: the read loop itself must stop
+        self.vsocket.rdata += [b'x'] * 100
+        clock = iter(range(0, 100000, 10))
+        with mock.patch.object(self.sa.time, 'monotonic', side_effect=lambda: next(clock)):
+            lines = self._audit_fails()
+        self.assertIn('did not receive banner (timeout)', lines[-1])
+
+    def test_trickled_packet_hits_deadline(self):
+        # one byte per recv, each inside the socket timeout: only the packet deadline ends it
+        self.vsocket.rdata += [BANNER, *(bytes([b]) for b in struct.pack('>IB', 1020, 4))]
+        self.vsocket.rdata += [b'\x14'] * 1000
+        clock = iter(range(0, 100000, 4))
+        with mock.patch.object(self.sa.time, 'monotonic', side_effect=lambda: next(clock)):
+            lines = self._audit_fails()
+        self.assertEqual(lines[-1], '[exception] error reading packet (timeout)')
+        self.assertGreater(len(self.vsocket.rdata), 900)
+
+    def test_trickled_oversized_packet_drain_hits_deadline(self):
+        self.vsocket.rdata += [BANNER, struct.pack('>IB', 0x7FFFFFF4, 4)] + [b'\x00'] * 1000
+        clock = iter(range(0, 100000, 4))
+        with mock.patch.object(self.sa.time, 'monotonic', side_effect=lambda: next(clock)):
+            lines = self._audit_fails()
+        self.assertIn('error reading packet', lines[-1])
+        self.assertGreater(len(self.vsocket.rdata), 900)
 
     def test_server_control_characters_are_escaped(self):
         self.vsocket.rdata += [

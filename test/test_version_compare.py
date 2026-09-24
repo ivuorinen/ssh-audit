@@ -17,7 +17,7 @@ class TestVersionCompare(unittest.TestCase):
         return self._software(f'SSH-2.0-OpenSSH_{v}')
 
     def get_libssh_software(self, v):
-        return self._software(f'SSH-2.0-libssh-{v}')
+        return self._software(f'SSH-2.0-libssh_{v}')
 
     def _assert_sequential(self, factory, versions):
         """Each version equals itself, is newer than its predecessor and older than its successor."""

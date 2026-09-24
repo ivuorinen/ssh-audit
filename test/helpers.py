@@ -10,6 +10,7 @@ import contextlib
 import importlib.util
 import io
 import socket
+import struct
 import sys
 import unittest
 from pathlib import Path
@@ -22,7 +23,7 @@ def load_ssh_audit():
     """Return the ssh-audit module, loading it by file path on first use.
 
     Cached so every test shares one module object, matching how the program
-    shares its module-level ``out`` and ``utils`` singletons at runtime.
+    shares its module-level ``out`` singleton at runtime.
     """
     module = sys.modules.get('ssh_audit')
     if module is None:
@@ -33,6 +34,76 @@ def load_ssh_audit():
         sys.modules['ssh_audit'] = module
         spec.loader.exec_module(module)
     return module
+
+
+def write_bool(wbuf, v):
+    """Append an SSH boolean to ``wbuf``."""
+    return wbuf.write_byte(1 if v else 0)
+
+
+def write_string(wbuf, v):
+    """Append a length-prefixed SSH string to ``wbuf``; str is encoded as UTF-8."""
+    if not isinstance(v, bytes):
+        v = v.encode('utf-8')
+    wbuf.write_int(len(v))
+    return wbuf.write(v)
+
+
+def write_list(wbuf, names):
+    """Append an SSH name-list (comma-separated, length-prefixed) to ``wbuf``."""
+    return write_string(wbuf, ','.join(names))
+
+
+def write_mpint1(wbuf, n):
+    """Append an SSH1 mpint (bit length, then unsigned big-endian body) to ``wbuf``."""
+    wbuf.write(struct.pack('>H', n.bit_length()))
+    return wbuf.write(load_ssh_audit().WriteBuf._create_mpint(n))
+
+
+def serialize_kex(kex):
+    """KEXINIT payload for ``kex`` (RFC 4253 §7.1), without the message-type byte.
+
+    The auditor only ever parses a KEXINIT, so the serialiser lives here rather
+    than in the shipped script: only tests build servers to audit.
+    """
+    w = load_ssh_audit().WriteBuf()
+    w.write(kex.cookie)
+    for names in (
+        kex.kex_algorithms,
+        kex.key_algorithms,
+        kex.client.encryption,
+        kex.server.encryption,
+        kex.client.mac,
+        kex.server.mac,
+        kex.client.compression,
+        kex.server.compression,
+        kex.client.languages,
+        kex.server.languages,
+    ):
+        write_list(w, names)
+    write_bool(w, kex.follows)
+    w.write_int(kex.unused)
+    return w.write_flush()
+
+
+def serialize_pkm(pkm):
+    """SMSG_PUBLIC_KEY payload for ``pkm``, without the message-type byte.
+
+    The counterpart to serialize_kex for SSH1; the auditor only parses this
+    message.
+    """
+    w = load_ssh_audit().WriteBuf()
+    w.write(pkm.cookie)
+    w.write_int(pkm.server_key_bits)
+    write_mpint1(w, pkm.server_key_public_exponent)
+    write_mpint1(w, pkm.server_key_public_modulus)
+    w.write_int(pkm.host_key_bits)
+    write_mpint1(w, pkm.host_key_public_exponent)
+    write_mpint1(w, pkm.host_key_public_modulus)
+    w.write_int(pkm.protocol_flags)
+    w.write_int(pkm.supported_ciphers_mask)
+    w.write_int(pkm.supported_authentications_mask)
+    return w.write_flush()
 
 
 @contextlib.contextmanager

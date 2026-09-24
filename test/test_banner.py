@@ -84,6 +84,8 @@ class TestBanner(unittest.TestCase):
         self.assertEqual(
             str(b('SSH-1.99-SSH-1.99-SSH-1.99-OpenSSH_3.9p1')), 'SSH-1.99-OpenSSH_3.9p1'
         )
+        # the lowest version, compared numerically: as strings '1.10' sorts below '1.5'
+        self.assertEqual(b('SSH-1.5-SSH-1.10-x').protocol, (1, 5))
 
 
 if __name__ == '__main__':

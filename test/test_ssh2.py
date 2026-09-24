@@ -2,7 +2,7 @@ import os
 import struct
 import unittest
 
-from helpers import VirtualSocketTestCase, capture, load_ssh_audit
+from helpers import VirtualSocketTestCase, capture, load_ssh_audit, serialize_kex, write_list
 
 COOKIE = b'\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xaa\xbb\xcc\xdd\xee\xff'
 KEX_ALGS = ['curve25519-sha256@libssh.org', 'ecdh-sha2-nistp256', 'ecdh-sha2-nistp384', 'ecdh-sha2-nistp521', 'diffie-hellman-group-exchange-sha256', 'diffie-hellman-group14-sha1']  # fmt: skip
@@ -19,6 +19,21 @@ def create_ssh2_packet(payload):
         padding += 8
     plen = len(payload) + padding + 1
     return struct.pack('>Ib', plen, padding) + payload + b'\x00' * padding
+
+
+def kex_payload(kex=KEX_ALGS, key=KEY_ALGS, enc=ENC_ALGS, mac=MAC_ALGS, compression=COMPRESSION):
+    """KEXINIT payload (no message-type byte) offering the same lists in both directions.
+
+    Module-level so other test modules build servers from it directly instead
+    of instantiating TestSSH2 or faking its ``self``.
+    """
+    w = load_ssh_audit().WriteBuf()
+    w.write(COOKIE)
+    for algs in (kex, key, enc, enc, mac, mac, compression, compression, [''], ['']):
+        write_list(w, algs)
+    w.write_byte(False)
+    w.write_int(0)
+    return w.write_flush()
 
 
 class TestSSH2(VirtualSocketTestCase):
@@ -40,37 +55,18 @@ class TestSSH2(VirtualSocketTestCase):
         conf.ssh2 = True
         return conf
 
-    def _kex_payload(
-        self, kex=KEX_ALGS, key=KEY_ALGS, enc=ENC_ALGS, mac=MAC_ALGS, compression=COMPRESSION
-    ):
-        w = self.wbuf()
-        w.write(COOKIE)
-        w.write_list(kex)
-        w.write_list(key)
-        w.write_list(enc)
-        w.write_list(enc)
-        w.write_list(mac)
-        w.write_list(mac)
-        w.write_list(compression)
-        w.write_list(compression)
-        w.write_list([''])
-        w.write_list([''])
-        w.write_byte(False)
-        w.write_int(0)
-        return w.write_flush()
-
     def _audit_server(self, banner, **algs):
         """Audit a server sending ``banner`` and a KEXINIT built from ``algs``; return stdout lines."""
         w = self.wbuf()
         w.write_byte(self.ssh.Protocol.MSG_KEXINIT)
-        w.write(self._kex_payload(**algs))
+        w.write(kex_payload(**algs))
         self.vsocket.rdata += [banner + b'\r\n', create_ssh2_packet(w.write_flush())]
         with capture() as output:
             self.audit(self._conf())
         return output['out']
 
     def test_kex_read(self):
-        kex = self.ssh2.Kex.parse(self._kex_payload())
+        kex = self.ssh2.Kex.parse(kex_payload())
         self.assertIsNotNone(kex)
         self.assertEqual(kex.cookie, COOKIE)
         self.assertEqual(kex.kex_algorithms, KEX_ALGS)
@@ -109,8 +105,9 @@ class TestSSH2(VirtualSocketTestCase):
 
     def test_key_payload(self):
         kex1 = self._get_kex_variat1()
-        kex2 = self.ssh2.Kex.parse(self._kex_payload())
-        self.assertEqual(kex1.payload, kex2.payload)
+        kex2 = self.ssh2.Kex.parse(kex_payload())
+        self.assertEqual(serialize_kex(kex1), serialize_kex(kex2))
+        self.assertEqual(serialize_kex(kex1), kex_payload())
 
     def _serve(self, payload):
         self.vsocket.rdata.append(b'SSH-2.0-OpenSSH_7.3 ssh-audit-test\r\n')
@@ -119,7 +116,7 @@ class TestSSH2(VirtualSocketTestCase):
     def test_ssh2_server_simple(self):
         w = self.wbuf()
         w.write_byte(self.ssh.Protocol.MSG_KEXINIT)
-        w.write(self._kex_payload())
+        w.write(kex_payload())
         self._serve(w.write_flush())
         with capture() as output:
             self.audit(self._conf())
@@ -151,7 +148,7 @@ class TestSSH2(VirtualSocketTestCase):
         # CVE matching by banner version was removed: distro backports made it wrong.
         w = self.wbuf()
         w.write_byte(self.ssh.Protocol.MSG_KEXINIT)
-        w.write(self._kex_payload())
+        w.write(kex_payload())
         self.vsocket.rdata.append(b'SSH-2.0-libssh-0.7.2\r\n')
         self.vsocket.rdata.append(create_ssh2_packet(w.write_flush()))
         with capture() as output:
@@ -198,6 +195,20 @@ class TestSSH2(VirtualSocketTestCase):
         )
         recs = [line for line in lines if line.startswith('(rec)')]
         self.assertEqual(recs, ['(rec) -ecdh-sha2-nistp256-- kex algorithm to remove '])
+
+    def test_recommended_names_longer_than_offered_ones_stay_aligned(self):
+        # Appended names come from the database and can outgrow the offered-name padding.
+        w = self.wbuf()
+        w.write_byte(self.ssh.Protocol.MSG_KEXINIT)
+        w.write(kex_payload(kex=['curve25519-sha256'], key=['ssh-ed25519'], enc=['aes128-ctr'], mac=['hmac-sha1']))  # fmt: skip
+        self.vsocket.rdata += [b'SSH-2.0-OpenSSH_9.6\r\n', create_ssh2_packet(w.write_flush())]
+        conf = self._conf()
+        conf.batch, conf.verbose = False, False
+        with capture() as output:
+            self.audit(conf)
+        recs = [line for line in output['out'] if line.startswith('(rec)')]
+        self.assertIn('(rec) +sntrup761x25519-sha512@openssh.com -- kex algorithm to append ', recs)
+        self.assertEqual(len({line.index(' -- ') for line in recs}), 1, recs)
 
     def test_ssh2_server_invalid_first_packet(self):
         w = self.wbuf()

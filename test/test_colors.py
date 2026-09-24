@@ -1,3 +1,4 @@
+import contextlib
 import io
 import os
 import sys
@@ -34,11 +35,26 @@ class TestColors(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
+    @contextlib.contextmanager
+    def colors_on(self, stream):
+        """Make Colors.enabled answer True for ``stream`` only.
+
+        The real predicate is POSIX-only, so tests that assert colour would fail
+        on the Windows CI leg. Stubbing it keeps what these tests are actually
+        about — that the stream consulted is the terminal behind any buffer, not
+        the buffer's own StringIO. test_colors_disabled_off_posix covers the
+        platform rule itself.
+        """
+        with mock.patch.object(
+            self.sa.Colors, 'enabled', staticmethod(lambda target: target is stream)
+        ):
+            yield
+
     def test_buffered_algorithm_lines_are_colored_by_level(self):
         # Algorithm sections print through an OutputBuffer; its StringIO is never a
         # terminal, which left every [fail] and [warn] line uncoloured.
         term = FakeTerminal()
-        with mock.patch.object(sys, 'stdout', term):
+        with mock.patch.object(sys, 'stdout', term), self.colors_on(term):
             self.sa.output_algorithms(
                 'host-key algorithms', self.sa.KexDB.ALGORITHMS, 'key', ['ssh-rsa'], 8
             )
@@ -80,9 +96,17 @@ class TestColors(unittest.TestCase):
 
     def test_errors_are_red_on_a_terminal_stderr(self):
         term = FakeTerminal()
-        with mock.patch.object(sys, 'stderr', term):
+        with mock.patch.object(sys, 'stderr', term), self.colors_on(term):
             self.out.error('[exception] boom')
         self.assertEqual(term.lines(), [f'{RED}[exception] boom{RESET}'])
+
+    def test_colors_disabled_off_posix(self):
+        # Windows consoles need console API calls this tool does not make. The
+        # patch wraps one call: os.name also drives pathlib, so holding it over
+        # anything wider breaks path handling on the platform being faked.
+        term = FakeTerminal()
+        with mock.patch.object(os, 'name', 'nt'):
+            self.assertIs(self.sa.Colors.enabled(term), False)
 
 
 class TestUnencodableOutput(unittest.TestCase):

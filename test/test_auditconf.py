@@ -178,6 +178,57 @@ class TestAuditConf(unittest.TestCase):
             )
         self._assert_exits('-l something localhost')
 
+    def test_cmdline_ipv6_targets(self):
+        # a bare IPv6 address was split on its first colon: '2001:db8::1' audited host '2001'
+        self._test_conf(self._cmdline('2001:db8::1'), host='2001:db8::1')
+        self._test_conf(self._cmdline('::1'), host='::1')
+        self._test_conf(self._cmdline('[::1]'), host='::1')
+        self._test_conf(self._cmdline('[2001:db8::1]:2222'), host='2001:db8::1', port=2222)
+        self._test_conf(self._cmdline('-p 2222 2001:db8::1'), host='2001:db8::1', port=2222)
+        # -p wins over a port in the target
+        self._test_conf(self._cmdline('-p 2222 localhost:22'), host='localhost', port=2222)
+        for args in ['[::1]:', '[::1]:abc', '[]:22']:
+            self._assert_exits(args)
+
+    def test_cmdline_rejects_more_than_one_host(self):
+        with self.assertRaises(SystemExit) as raised, capture() as output:
+            self.AuditConf.from_cmdline(['host1', 'host2'], self.usage)
+        self.assertEqual(raised.exception.code, 1)
+        # the whole message, usage text included, goes to stderr on a failure
+        self.assertIn('only one host', '\n'.join(output['err']))
+        self.assertEqual(output['out'], [])
+
+    def test_cmdline_help_exits_0_and_errors_exit_1(self):
+        for args, code in [('-h', 0), ('--help', 0), ('', 1), ('-x', 1), ('-p abc h', 1)]:
+            with self.assertRaises(SystemExit, msg=args) as raised, capture() as output:
+                self.AuditConf.from_cmdline(args.split(), self.usage)
+            self.assertEqual(raised.exception.code, code, args)
+            # Help belongs on stdout; a failure puts the whole message on stderr,
+            # so a redirected report never collects usage lines.
+            printed, other = (
+                (output['out'], output['err'])
+                if code == 0
+                else (
+                    output['err'],
+                    output['out'],
+                )
+            )
+            self.assertIn('usage: ', '\n'.join(printed), args)
+            self.assertEqual(other, [], args)
+
+    def test_cmdline_errors_honour_no_colors(self):
+        seen = []
+
+        def usage_cb(err=None, colors=True):
+            """Record what from_cmdline asks usage to print instead of exiting the test run."""
+            seen.append((err, colors))
+            raise SystemExit(1)
+
+        for args, colors in [('-n -p abc h', False), ('-p abc -n h', False), ('-p abc h', True)]:
+            with self.assertRaises(SystemExit):
+                self.AuditConf.from_cmdline(args.split(), usage_cb)
+            self.assertEqual(seen[-1], ('port abc is not valid', colors), args)
+
 
 if __name__ == '__main__':
     unittest.main()

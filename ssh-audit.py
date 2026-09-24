@@ -10,6 +10,7 @@ Single-file, standard-library-only tool; see LICENSE for the full MIT terms.
 
 import base64
 import binascii
+import contextlib
 import errno
 import getopt
 import hashlib
@@ -30,28 +31,41 @@ VERSION = 'v1.7.0'
 type AlgorithmDB = dict[str, dict[str, list[list[str | None]]]]
 
 
-def usage(err: str | None = None) -> NoReturn:
+def usage(err: str | None = None, colors: bool = True) -> NoReturn:
+    """Print the help text and exit: status 0 when help was asked for, 1 with ``err``.
+
+    ``colors`` carries ``-n`` through: usage runs while the command line is
+    still being parsed, before audit() applies the options to ``out``, so a
+    fresh Output would otherwise colour the error regardless of ``-n``.
+
+    On failure the whole message goes to stderr, help text included: stdout is
+    the report, and a redirected report must not collect usage lines.
+    """
     uout = Output()
+    uout.colors = colors
     p = os.path.basename(sys.argv[0])
-    uout.head(f'# {p} {VERSION}, https://github.com/ivuorinen/ssh-audit\n')
-    if err is not None:
-        uout.error(err)
-    uout.info(f'usage: {p} [-1246pbnvl] <host>\n')
-    uout.info('   -h,  --help             print this help')
-    uout.info('   -1,  --ssh1             force ssh version 1 only')
-    uout.info('   -2,  --ssh2             force ssh version 2 only')
-    uout.info('   -4,  --ipv4             enable IPv4 (order of precedence)')
-    uout.info('   -6,  --ipv6             enable IPv6 (order of precedence)')
-    uout.info('   -p,  --port=<port>      port to connect')
-    uout.info('   -b,  --batch            batch output')
-    uout.info('   -n,  --no-colors        disable colors')
-    uout.info('   -v,  --verbose          verbose output')
-    uout.info('   -l,  --level=<level>    minimum output level (info|warn|fail)')
-    uout.sep()
-    sys.exit(1)
+    with contextlib.redirect_stdout(sys.stdout if err is None else sys.stderr):
+        uout.head(f'# {p} {VERSION}, https://github.com/ivuorinen/ssh-audit\n')
+        if err is not None:
+            uout.error(err)
+        uout.info(f'usage: {p} [-h1246pbnvl] <host>\n')
+        uout.info('   -h,  --help             print this help')
+        uout.info('   -1,  --ssh1             force ssh version 1 only')
+        uout.info('   -2,  --ssh2             force ssh version 2 only')
+        uout.info('   -4,  --ipv4             enable IPv4 (order of precedence)')
+        uout.info('   -6,  --ipv6             enable IPv6 (order of precedence)')
+        uout.info('   -p,  --port=<port>      port to connect')
+        uout.info('   -b,  --batch            batch output')
+        uout.info('   -n,  --no-colors        disable colors')
+        uout.info('   -v,  --verbose          verbose output')
+        uout.info('   -l,  --level=<level>    minimum output level (info|warn|fail)')
+        uout.sep()
+    sys.exit(0 if err is None else 1)
 
 
 class AuditConf:
+    """Validated audit options; every assignment passes through ``__setattr__``."""
+
     def __init__(self, host: str | None = None, port: int = 22) -> None:
         self.host = host
         self.port = port
@@ -103,9 +117,30 @@ class AuditConf:
             raise AttributeError(f'unknown option: {name}')
         object.__setattr__(self, name, value)
 
+    @staticmethod
+    def _split_target(target: str) -> tuple[str, str | None]:
+        """Split ``host``, ``host:port``, ``[addr]`` or ``[addr]:port`` into host and port text.
+
+        A bare IPv6 address has several colons and is returned whole: splitting
+        it on the first colon turned ``2001:db8::1`` into the host ``2001``,
+        which resolves to the IPv4 address 0.0.7.209.
+        """
+        mx = re.match(r'^\[([^\]]*)\](?::(.*))?$', target)
+        if mx:
+            return mx.group(1), mx.group(2)
+        if target.count(':') == 1:
+            host, port = target.split(':')
+            return host.strip(), port
+        return target.strip(), None
+
     @classmethod
     def from_cmdline(cls, args: list[str], usage_cb: Callable[..., NoReturn]) -> AuditConf:
+        """Build the configuration from command-line arguments; bad input exits via ``usage_cb``.
 
+        The port and level rules live only in ``__setattr__``; this method turns
+        its ValueError into a usage error. ``-p`` takes precedence over a port
+        given in the target.
+        """
         aconf = cls()
         try:
             sopts = 'h1246p:bnvl:'
@@ -124,11 +159,18 @@ class AuditConf:
             opts, args = getopt.getopt(args, sopts, lopts)
         except getopt.GetoptError as err:
             usage_cb(str(err))
+        # -n must also cover usage errors raised before the loop reaches it.
+        colors = all(o not in ('-n', '--no-colors') for o, _ in opts)
+
+        def fail(err: str | None = None) -> NoReturn:
+            """Exit through ``usage_cb`` with ``-n`` honoured."""
+            usage_cb(err, colors)
+
         aconf.ssh1, aconf.ssh2 = False, False
         oport = None
         for o, a in opts:
             if o in ('-h', '--help'):
-                usage_cb()
+                fail()
             elif o in ('-1', '--ssh1'):
                 aconf.ssh1 = True
             elif o in ('-2', '--ssh2'):
@@ -147,33 +189,37 @@ class AuditConf:
             elif o in ('-v', '--verbose'):
                 aconf.verbose = True
             else:  # -l/--level, the last declared option
-                if a not in ('info', 'warn', 'fail'):
-                    usage_cb(f'level {a} is not valid')
-                aconf.minlevel = a
-        if len(args) == 0:
-            usage_cb()
-        if oport is not None:
-            host = args[0]
-            port = parse_int(oport)
-        else:
-            s = args[0].split(':')
-            host = s[0].strip()
-            if len(s) == 2:
-                oport, port = s[1], parse_int(s[1])
-            else:
-                oport, port = '22', 22
+                try:
+                    aconf.minlevel = a
+                except ValueError:
+                    fail(f'level {a} is not valid')
+        if len(args) != 1:
+            fail('only one host can be audited' if args else 'host is required')
+        host, tport = cls._split_target(args[0])
+        if oport is None:
+            oport = tport
         if not host:
-            usage_cb('host is empty')
-        if port <= 0 or port > 65535:
-            usage_cb(f'port {oport} is not valid')
+            fail('host is empty')
         aconf.host = host
-        aconf.port = port
+        if oport is not None:
+            try:
+                aconf.port = parse_int(oport)
+            except ValueError:
+                fail(f'port {oport} is not valid')
         if not (aconf.ssh1 or aconf.ssh2):
             aconf.ssh1, aconf.ssh2 = True, True
         return aconf
 
 
 class Output:
+    """Level-filtered, escaped and optionally coloured report lines.
+
+    One method per level: ``out.warn(text)`` prints ``text`` when ``warn`` is at
+    or above ``minlevel``. ``good`` ranks as ``info``; ``head`` is never filtered
+    and is dropped in batch mode. They were a catch-all ``__getattr__``, which
+    made every misspelling (``out.wran``) type-check and print unfiltered.
+    """
+
     LEVELS = ['info', 'warn', 'fail']
 
     def __init__(self) -> None:
@@ -193,12 +239,14 @@ class Output:
         self.__minlevel = self.getlevel(name)
 
     def getlevel(self, name: str) -> int:
+        """Rank of ``name``; names outside LEVELS rank above ``fail`` so they always print."""
         cname = 'info' if name == 'good' else name
         if cname not in self.LEVELS:
             return sys.maxsize
         return self.LEVELS.index(cname)
 
     def sep(self) -> None:
+        """Blank line between sections; omitted in batch mode, whose lines are parsed."""
         if not self.batch:
             print()
 
@@ -255,6 +303,9 @@ class Output:
         Characters the output stream's encoding cannot represent (CJK text in a
         header on a cp1252 console) are escaped too; printing them raised
         UnicodeEncodeError and aborted the audit.
+
+        Newline and tab stay literal: this program's own usage text embeds
+        newlines, and a server cannot embed one in a line it sends.
         """
         escaped = ''.join(
             c
@@ -272,17 +323,38 @@ class Output:
         except LookupError:
             return escaped
 
-    def __getattr__(self, name: str) -> Callable[[str], None]:
-        if name == 'head' and self.batch:
-            return lambda x: None
-        if not self.getlevel(name) >= self.__minlevel:
-            return lambda x: None
+    def _emit(self, level: str, text: str) -> None:
+        """Print ``text`` at ``level`` unless batch mode or the level filter drops it."""
+        if level == 'head' and self.batch:
+            return
+        if self.getlevel(level) < self.__minlevel:
+            return
+        line = self.escape(text)
         if self.colors and self.colors_supported:
-            return lambda x: print(Colors.paint(name, self.escape(x)))
-        return lambda x: print(self.escape(x))
+            line = Colors.paint(level, line)
+        print(line)
+
+    def head(self, text: str) -> None:
+        """Section header; never level-filtered, dropped in batch mode."""
+        self._emit('head', text)
+
+    def good(self, text: str) -> None:
+        """A finding with nothing against it; ranks as ``info``."""
+        self._emit('good', text)
+
+    def info(self, text: str) -> None:
+        self._emit('info', text)
+
+    def warn(self, text: str) -> None:
+        self._emit('warn', text)
+
+    def fail(self, text: str) -> None:
+        self._emit('fail', text)
 
 
 class OutputBuffer(list[str]):
+    """Captures stdout into a list of lines so a section header prints only when the section has lines."""
+
     class Capture(StringIO):
         """The StringIO an OutputBuffer installs as stdout; remembers the stream it replaced."""
 
@@ -308,6 +380,7 @@ class OutputBuffer(list[str]):
         return self
 
     def flush(self) -> None:
+        """Print the captured lines; they were already filtered, escaped and coloured on capture."""
         for line in self:
             print(line)
 
@@ -317,7 +390,11 @@ class OutputBuffer(list[str]):
 
 
 class SSH2:
+    """SSH2 message types this tool reads: only the server's SSH_MSG_KEXINIT."""
+
     class KexParty:
+        """One direction's algorithm lists from a KEXINIT (client-to-server or server-to-client)."""
+
         def __init__(
             self, enc: list[str], mac: list[str], compression: list[str], languages: list[str]
         ) -> None:
@@ -343,6 +420,8 @@ class SSH2:
             return self.__languages
 
     class Kex:
+        """SSH_MSG_KEXINIT payload (RFC 4253 section 7.1), without the message-type byte."""
+
         def __init__(
             self,
             cookie: bytes,
@@ -391,29 +470,9 @@ class SSH2:
         def unused(self) -> int:
             return self.__unused
 
-        def write(self, wbuf: WriteBuf) -> None:
-            wbuf.write(self.cookie)
-            wbuf.write_list(self.kex_algorithms)
-            wbuf.write_list(self.key_algorithms)
-            wbuf.write_list(self.client.encryption)
-            wbuf.write_list(self.server.encryption)
-            wbuf.write_list(self.client.mac)
-            wbuf.write_list(self.server.mac)
-            wbuf.write_list(self.client.compression)
-            wbuf.write_list(self.server.compression)
-            wbuf.write_list(self.client.languages)
-            wbuf.write_list(self.server.languages)
-            wbuf.write_bool(self.follows)
-            wbuf.write_int(self.__unused)
-
-        @property
-        def payload(self) -> bytes:
-            wbuf = WriteBuf()
-            self.write(wbuf)
-            return wbuf.write_flush()
-
         @classmethod
         def parse(cls, payload: bytes) -> SSH2.Kex:
+            """Decode a KEXINIT payload; a truncated one raises struct.error, which audit() reports."""
             buf = ReadBuf(payload)
             cookie = buf.read(16)
             kex_algs = buf.read_list()
@@ -435,6 +494,8 @@ class SSH2:
 
 
 class SSH1:
+    """SSH protocol 1.5: the server's SMSG_PUBLIC_KEY and the tables to interpret it."""
+
     CIPHERS = ['none', 'idea', 'des', '3des', 'tss', 'rc4', 'blowfish']
     # bit 0 is unused by the protocol
     AUTHS = ['', 'rhosts', 'rsa', 'password', 'rhosts_rsa', 'tis', 'kerberos']
@@ -449,6 +510,8 @@ class SSH1:
         return binascii.crc32(v, 0xFFFFFFFF) ^ 0xFFFFFFFF
 
     class KexDB:
+        """SSH1 algorithm notes, in the AlgorithmDB layout the SSH2 KexDB uses."""
+
         # fmt: off
         FAIL_PLAINTEXT        = 'no encryption/integrity'
         FAIL_OPENSSH37_REMOVE = 'removed since OpenSSH 3.7'
@@ -481,6 +544,8 @@ class SSH1:
         # fmt: on
 
     class PublicKeyMessage:
+        """SMSG_PUBLIC_KEY: server and host RSA keys plus the cipher and authentication masks."""
+
         def __init__(
             self,
             cookie: bytes,
@@ -490,8 +555,6 @@ class SSH1:
             cmask: int,
             amask: int,
         ) -> None:
-            assert len(skey) == 3
-            assert len(hkey) == 3
             self.__cookie = cookie
             self.__server_key = skey
             self.__host_key = hkey
@@ -529,9 +592,9 @@ class SSH1:
 
         @property
         def host_key_fingerprint_data(self) -> bytes:
-
-            mod = WriteBuf._create_mpint(self.host_key_public_modulus, False)
-            e = WriteBuf._create_mpint(self.host_key_public_exponent, False)
+            """Modulus then exponent bytes, the input OpenSSH hashes for an RSA1 key fingerprint."""
+            mod = WriteBuf._create_mpint(self.host_key_public_modulus)
+            e = WriteBuf._create_mpint(self.host_key_public_exponent)
             return mod + e
 
         @property
@@ -562,26 +625,9 @@ class SSH1:
                     auths.append(SSH1.AUTHS[i])
             return auths
 
-        def write(self, wbuf: WriteBuf) -> None:
-            wbuf.write(self.cookie)
-            wbuf.write_int(self.server_key_bits)
-            wbuf.write_mpint1(self.server_key_public_exponent)
-            wbuf.write_mpint1(self.server_key_public_modulus)
-            wbuf.write_int(self.host_key_bits)
-            wbuf.write_mpint1(self.host_key_public_exponent)
-            wbuf.write_mpint1(self.host_key_public_modulus)
-            wbuf.write_int(self.protocol_flags)
-            wbuf.write_int(self.supported_ciphers_mask)
-            wbuf.write_int(self.supported_authentications_mask)
-
-        @property
-        def payload(self) -> bytes:
-            wbuf = WriteBuf()
-            self.write(wbuf)
-            return wbuf.write_flush()
-
         @classmethod
         def parse(cls, payload: bytes) -> SSH1.PublicKeyMessage:
+            """Decode an SMSG_PUBLIC_KEY payload; a truncated one raises struct.error, which audit() reports."""
             buf = ReadBuf(payload)
             cookie = buf.read(8)
             server_key_bits = buf.read_int()
@@ -600,6 +646,12 @@ class SSH1:
 
 
 class ReadBuf:
+    """Big-endian SSH wire-format reader (bytes, uint32, name-lists, SSH1 mpints, lines).
+
+    Short input is not checked here: a struct-based read of too few bytes
+    raises struct.error, which audit() reports as a malformed packet.
+    """
+
     def __init__(self, data: bytes | None = None) -> None:
         super().__init__()
         self._buf = BytesIO(data) if data else BytesIO()
@@ -627,38 +679,24 @@ class ReadBuf:
         list_size = self.read_int()
         return self.read(list_size).decode('utf-8', 'replace').split(',')
 
-    def read_string(self) -> bytes:
-        n = self.read_int()
-        return self.read(n)
-
-    @classmethod
-    def _parse_mpint(cls, v: bytes, pad: bytes, sf: str) -> int:
-        r = 0
-        if len(v) % 4:
-            v = pad * (4 - (len(v) % 4)) + v
-        for i in range(0, len(v), 4):
-            r = (r << 32) | struct.unpack(sf, v[i : i + 4])[0]
-        return r
-
     def read_mpint1(self) -> int:
         # NOTE: Data Type Enc @ http://www.snailbook.com/docs/protocol-1.5.txt
         bits = struct.unpack('>H', self.read(2))[0]
-        n = (bits + 7) // 8
-        return self._parse_mpint(self.read(n), b'\x00', '>I')
-
-    def read_mpint2(self) -> int:
-        # NOTE: Section 5 @ https://www.ietf.org/rfc/rfc4251.txt
-        v = self.read_string()
-        if len(v) == 0:
-            return 0
-        pad, sf = (b'\xff', '>i') if ord(v[0:1]) & 0x80 else (b'\x00', '>I')
-        return self._parse_mpint(v, pad, sf)
+        return int.from_bytes(self.read((bits + 7) // 8), 'big')
 
     def read_line(self) -> str:
         return self._buf.readline().rstrip().decode('utf-8', 'replace')
 
 
 class WriteBuf:
+    """Big-endian SSH wire-format writer; methods chain.
+
+    Only what the auditor itself writes: the packet header it echoes back in an
+    error, and the SSH1 mpint bodies a fingerprint hashes. It is not a full
+    mirror of ReadBuf — this tool sends no SSH message, so the KEXINIT and
+    SMSG_PUBLIC_KEY serialisers live with the tests that need them.
+    """
+
     def __init__(self, data: bytes | None = None) -> None:
         super().__init__()
         self._wbuf = BytesIO(data) if data else BytesIO()
@@ -670,49 +708,16 @@ class WriteBuf:
     def write_byte(self, v: int) -> WriteBuf:
         return self.write(struct.pack('B', v))
 
-    def write_bool(self, v: bool) -> WriteBuf:
-        return self.write_byte(1 if v else 0)
-
     def write_int(self, v: int) -> WriteBuf:
         return self.write(struct.pack('>I', v))
 
-    def write_string(self, v: bytes | str) -> WriteBuf:
-        if not isinstance(v, bytes):
-            v = v.encode('utf-8')
-        self.write_int(len(v))
-        return self.write(v)
+    @staticmethod
+    def _create_mpint(n: int) -> bytes:
+        """Unsigned big-endian bytes of ``n`` with no leading zeros: the SSH1 mpint body.
 
-    def write_list(self, v: list[str]) -> WriteBuf:
-        return self.write_string(','.join(v))
-
-    @classmethod
-    def _create_mpint(cls, n: int, signed: bool = True, bits: int | None = None) -> bytes:
-        if bits is None:
-            bits = n.bit_length()
-        length = bits // 8 + (1 if n != 0 else 0)
-        ql = (length + 7) // 8
-        fmt, v2 = f'>{ql}Q', [0] * ql
-        for i in range(ql):
-            v2[ql - i - 1] = n & 0xFFFFFFFFFFFFFFFF
-            n >>= 64
-        data = bytes(struct.pack(fmt, *v2)[-length:])
-        if not signed:
-            data = data.lstrip(b'\x00')
-        elif data.startswith(b'\xff\x80'):
-            data = data[1:]
-        return data
-
-    def write_mpint1(self, n: int) -> WriteBuf:
-        # NOTE: Data Type Enc @ http://www.snailbook.com/docs/protocol-1.5.txt
-        bits = n.bit_length()
-        data = self._create_mpint(n, False, bits)
-        self.write(struct.pack('>H', bits))
-        return self.write(data)
-
-    def write_mpint2(self, n: int) -> WriteBuf:
-        # NOTE: Section 5 @ https://www.ietf.org/rfc/rfc4251.txt
-        data = self._create_mpint(n)
-        return self.write_string(data)
+        SSH2's signed mpint is not needed: this tool never parses SSH2 keys.
+        """
+        return n.to_bytes((n.bit_length() + 7) // 8, 'big')
 
     def write_flush(self) -> bytes:
         payload = self._wbuf.getvalue()
@@ -722,18 +727,26 @@ class WriteBuf:
 
 
 class SSH:
+    """Version-independent pieces: banner, software identification, fingerprint, transport."""
+
     class Protocol:
+        """Message numbers of the first server packet this tool expects."""
+
         # fmt: off
         SMSG_PUBLIC_KEY = 2
         MSG_KEXINIT     = 20
         # fmt: on
 
     class Product:
+        """Product names; they also key the per-product version history in the algorithm DBs."""
+
         OpenSSH = 'OpenSSH'
         DropbearSSH = 'Dropbear SSH'
         LibSSH = 'libssh'
 
     class Software:
+        """Server software identified from the banner's software and comment fields."""
+
         def __init__(
             self,
             vendor: str | None,
@@ -769,7 +782,13 @@ class SSH:
             return self.__os
 
         def compare_version(self, other: None | SSH.Software | str) -> int:
+            """Return -1, 0 or 1 as this software's version is below, equal to or above ``other``.
 
+            Versions compare numerically; ties fall to the patch text. Dropbear
+            ``testN`` builds rank below releases (any other patch text gets a
+            ``z`` prefix). An OpenSSH ``pN`` portable suffix is ignored unless both
+            sides carry one, so ``7.3`` equals ``7.3p1``. ``None`` ranks lowest.
+            """
             if other is None:
                 return 1
             if isinstance(other, SSH.Software):
@@ -807,6 +826,7 @@ class SSH:
             return 0
 
         def display(self, full: bool = True) -> str:
+            """Human-readable name; ``full=False`` drops patch and OS for the recommendations title."""
             r = f'{self.vendor} ' if self.vendor else ''
             r += f'{self.product} {self.version}'
             if full:
@@ -839,7 +859,12 @@ class SSH:
             return re.sub(r'^[-_\.]+', '', patch) or None
 
         @staticmethod
-        def _fix_date(d: str) -> str | None:
+        def _fix_date(d: str | None) -> str | None:
+            """Format an 8-digit date as YYYY-MM-DD; None for anything else.
+
+            None arrives from the callers' optional date groups: a bare
+            ``NetBSD`` comment carries no date, so ``mx.group(1)`` is None.
+            """
             if d is not None and len(d) == 8:
                 return f'{d[:4]}-{d[4:6]}-{d[6:8]}'
             else:
@@ -873,7 +898,7 @@ class SSH:
 
         @classmethod
         def parse(cls, banner: SSH.Banner) -> SSH.Software | None:
-
+            """Identify known server software; None for anything unrecognised, which disables append advice."""
             software = str(banner.software)
             mx = re.match(r'^dropbear_([\d\.]+\d+)(.*)', software)
             if mx:
@@ -884,7 +909,9 @@ class SSH:
                 patch = cls._fix_patch(mx.group(2))
                 os_version = cls._extract_os_version(banner.comments)
                 return cls(None, SSH.Product.OpenSSH, mx.group(1), patch, os_version)
-            mx = re.match(r'^libssh-([\d\.]+\d+)(.*)', software)
+            # libssh announces itself with an underscore ("SSH-2.0-libssh_0.9.6",
+            # priv.h CLIENT_BANNER_SSH2); releases before 0.7 used a hyphen.
+            mx = re.match(r'^libssh[-_]([\d\.]+\d+)(.*)', software)
             if mx:
                 patch = cls._fix_patch(mx.group(2))
                 os_version = cls._extract_os_version(banner.comments)
@@ -905,6 +932,8 @@ class SSH:
             return None
 
     class Banner:
+        """Parsed identification string (RFC 4253 section 4.2), tolerant of real-world variants."""
+
         _RXP, _RXR = r'SSH-\d\.\s*?\d+', r'(-\s*([^\s]*)(?:\s+(.*))?)?'
         RX_PROTOCOL = re.compile(re.sub(r'\\d(\+?)', r'(\\d\g<1>)', _RXP))
         RX_BANNER = re.compile(rf'^({_RXP}(?:(?:-{_RXP})*)){_RXR}$')
@@ -956,13 +985,18 @@ class SSH:
 
         @classmethod
         def parse(cls, banner: str) -> SSH.Banner | None:
+            """Parse one line, or None when it is not an identification string.
+
+            Repeated ``SSH-x.y-`` prefixes are accepted and the lowest protocol
+            version kept; whitespace inside software and comments is collapsed.
+            """
             valid_ascii = banner.isascii()
             ascii_banner = banner.encode('ascii', 'replace').decode('ascii')
             mx = cls.RX_BANNER.match(ascii_banner)
             if mx is None:
                 return None
-            protocol = min(re.findall(cls.RX_PROTOCOL, mx.group(1)))
-            protocol = (int(protocol[0]), int(protocol[1]))
+            # Compare the versions numerically: as strings '1.10' sorts below '1.5'.
+            protocol = min((int(a), int(b)) for a, b in re.findall(cls.RX_PROTOCOL, mx.group(1)))
             software = (mx.group(3) or '').strip() or None
             if software is None and (mx.group(2) or '').startswith('-'):
                 software = ''
@@ -972,6 +1006,8 @@ class SSH:
             return cls(protocol, software, comments, valid_ascii)
 
     class Fingerprint:
+        """Host-key fingerprint in OpenSSH's ``SHA256:<unpadded base64>`` form."""
+
         def __init__(self, fpd: bytes) -> None:
             self.__fpd = fpd
 
@@ -981,15 +1017,23 @@ class SSH:
             r = h.decode('ascii').rstrip('=')
             return f'SHA256:{r}'
 
-    class Socket(ReadBuf, WriteBuf):
+    class Socket(ReadBuf):
+        """TCP connection to the audited server; received bytes accumulate in the ReadBuf.
+
+        Every read from the server is bounded in lines, bytes and wall-clock
+        time: the server is untrusted input.
+        """
+
         class InsufficientReadException(Exception):
-            pass
+            """The peer stopped before a packet was complete; args[0] is the reason, None at EOF."""
 
         # Pre-banner bounds: OpenSSH's client gives up after 1024 lines; the
         # deadline stops a tarpit that trickles lines just inside the read timeout.
         MAX_PRE_BANNER_LINES = 1024
         MAX_LINE_LENGTH = 8192
         BANNER_TIMEOUT = 15.0
+        # The same tarpit bound for the first binary packet.
+        PACKET_TIMEOUT = 15.0
         # Largest packet_length accepted: OpenSSH's PACKET_MAX_SIZE for SSH2,
         # the protocol 1.5 specification limit for SSH1.
         MAX_PACKET_LENGTH = {1: 262144, 2: 256 * 1024}
@@ -1023,11 +1067,16 @@ class SSH:
                 # getaddrinfo was asked for SOCK_STREAM, so every entry is a stream address.
                 for af, _socktype, _proto, _canonname, addr in r:
                     yield (af, addr)
-            except OSError as e:
+            # UnicodeError: the IDNA codec rejects names such as a label over 63 characters.
+            except (OSError, UnicodeError) as e:
                 out.error(f'[exception] {e}')
                 sys.exit(1)
 
         def connect(self, ipvo: Sequence[int] = (), cto: float = 3.0, rto: float = 5.0) -> None:
+            """Connect to the first reachable resolved address; report and exit when none is.
+
+            ``cto`` bounds each connect attempt, ``rto`` every later recv.
+            """
             err = None
             for af, addr in self._resolve(ipvo):
                 s = None
@@ -1049,28 +1098,33 @@ class SSH:
             out.error(f'[exception] {errm}')
             sys.exit(1)
 
-        def get_banner(self, sshv: int = 2) -> tuple[SSH.Banner | None, list[str]]:
+        def get_banner(self, sshv: int = 2) -> tuple[SSH.Banner | None, list[str], str]:
+            """Send our identification, then read lines until the server's banner.
+
+            Returns the banner (None if none arrived), the lines before it, and
+            why reading stopped when no banner came. Our line goes out first:
+            RFC 4253 section 4.2 lets a server wait for it, and servers that
+            answer only after it, or send their banner late, were reported as
+            silent while this waited 0.7 s for the server to speak first.
+            """
             banner = f'SSH-{"1.5" if sshv == 1 else "2.0"}-OpenSSH_10.3'
-            rto = self._sock.gettimeout()
-            self._sock.settimeout(0.7)
-            s, e = self.recv()
-            self._sock.settimeout(rto)
-            if s < 0:
-                return self.__banner, self.__header
             self.send(banner.encode() + b'\r\n')
             deadline = time.monotonic() + self.BANNER_TIMEOUT
-            eof = False
-            while self.__banner is None and not eof:
+            reason = ''
+            while self.__banner is None and not reason:
                 # Only a complete line is parsed: a banner split across TCP
                 # segments would otherwise match as a truncated banner.
                 while not self._has_unread_line() and self.unread_len < self.MAX_LINE_LENGTH:
                     s, e = self.recv()
-                    if s < 0 or time.monotonic() > deadline:
-                        eof = True
+                    if s < 0:
+                        reason = e or 'connection closed'
+                        break
+                    if time.monotonic() > deadline:
+                        reason = 'timeout'
                         break
                 while self.__banner is None and self.unread_len > 0:
                     if (
-                        not eof
+                        not reason
                         and not self._has_unread_line()
                         and self.unread_len < self.MAX_LINE_LENGTH
                     ):
@@ -1081,14 +1135,22 @@ class SSH:
                     self.__banner = SSH.Banner.parse(line)
                     if self.__banner is None:
                         self.__header.append(line)
-                if len(self.__header) >= self.MAX_PRE_BANNER_LINES or time.monotonic() > deadline:
-                    break
-            return self.__banner, self.__header
+                if len(self.__header) >= self.MAX_PRE_BANNER_LINES:
+                    reason = reason or 'too many pre-banner lines'
+                elif time.monotonic() > deadline:
+                    reason = reason or 'timeout'
+            return self.__banner, self.__header, reason
 
         def _has_unread_line(self) -> bool:
             return self._buf.getvalue().find(b'\n', self._buf.tell()) != -1
 
         def recv(self, size: int = 2048) -> tuple[int, str | None]:
+            """Append up to ``size`` received bytes to the read buffer without moving the read position.
+
+            Returns ``(bytes received, None)``, ``(0, 'retry')`` when the call
+            would block, ``(-1, reason)`` on error or timeout and ``(-1, None)``
+            at EOF.
+            """
             try:
                 data = self._sock.recv(size)
             except TimeoutError:
@@ -1107,35 +1169,52 @@ class SSH:
             return (len(data), None)
 
         def send(self, data: bytes) -> tuple[int, str | None]:
+            """Send ``data``; failures are returned, not raised, so a banner already sent still gets read."""
             try:
                 self._sock.send(data)
                 return (0, None)
             except OSError as e:
                 return (-1, str(e.args[-1]))
 
-        def ensure_read(self, size: int) -> None:
+        def ensure_read(self, size: int, deadline: float) -> None:
+            """Buffer until ``size`` bytes are unread; raise InsufficientReadException otherwise.
+
+            The per-recv socket timeout alone never ends a read from a server
+            that trickles bytes just inside it, so ``deadline`` (a
+            time.monotonic() value) bounds the whole read.
+            """
             while self.unread_len < size:
+                if time.monotonic() > deadline:
+                    raise SSH.Socket.InsufficientReadException('timeout')
                 s, e = self.recv()
                 if s < 0:
                     raise SSH.Socket.InsufficientReadException(e)
 
         def read_packet(self, sshv: int = 2) -> tuple[int, bytes]:
+            """Read one unencrypted binary packet; return ``(message type, payload)``.
+
+            On failure the type is -1 and the second value is what the server
+            sent instead (bounded), or the read error, so audit() can show it
+            and recognise "Protocol major versions differ." Framing violations
+            are reported and exit here. The whole read shares PACKET_TIMEOUT.
+            """
             header = WriteBuf()
+            deadline = time.monotonic() + self.PACKET_TIMEOUT
             try:
-                self.ensure_read(4)
+                self.ensure_read(4, deadline)
                 packet_length = self.read_int()
                 header.write_int(packet_length)
                 if packet_length > self.MAX_PACKET_LENGTH[sshv]:
                     # Not a packet: typically a plaintext error such as
                     # "Protocol major versions differ.", whose first four bytes
                     # read as a huge length. Return what the server sent, bounded.
-                    self._drain(self.MAX_PACKET_LENGTH[sshv])
+                    self._drain(self.MAX_PACKET_LENGTH[sshv], deadline)
                     header.write(self.read(self.unread_len))
                     return (-1, header.write_flush().strip())
                 padding = b''
                 if sshv == 1:
                     padding_length = 8 - packet_length % 8
-                    self.ensure_read(padding_length)
+                    self.ensure_read(padding_length, deadline)
                     padding = self.read(padding_length)
                     header.write(padding)
                     payload_length = packet_length
@@ -1143,7 +1222,7 @@ class SSH:
                     # type byte + CRC32
                     valid = packet_length >= 5
                 else:
-                    self.ensure_read(1)
+                    self.ensure_read(1, deadline)
                     padding_length = self.read_byte()
                     header.write_byte(padding_length)
                     payload_length = packet_length - padding_length - 1
@@ -1156,7 +1235,7 @@ class SSH:
                 if not valid:
                     out.error('[exception] invalid ssh packet (length)')
                     sys.exit(1)
-                self.ensure_read(payload_length)
+                self.ensure_read(payload_length, deadline)
                 if sshv == 1:
                     payload = self.read(payload_length - 4)
                     header.write(payload)
@@ -1168,7 +1247,7 @@ class SSH:
                 else:
                     payload = self.read(payload_length)
                     header.write(payload)
-                    self.ensure_read(padding_length)
+                    self.ensure_read(padding_length, deadline)
                     self.read(padding_length)
                 return payload[0], payload[1:]
             except SSH.Socket.InsufficientReadException as ex:
@@ -1179,9 +1258,9 @@ class SSH:
                     e = ex.args[0].encode('utf-8')
                 return (-1, e)
 
-        def _drain(self, limit: int) -> None:
-            """Buffer incoming data until the peer stops sending or ``limit`` bytes wait."""
-            while self.unread_len < limit:
+        def _drain(self, limit: int, deadline: float) -> None:
+            """Buffer incoming data until the peer stops, ``limit`` bytes wait, or ``deadline`` passes."""
+            while self.unread_len < limit and time.monotonic() <= deadline:
                 s, _ = self.recv()
                 if s < 0:
                     return
@@ -1197,7 +1276,7 @@ class SSH:
             try:
                 s.shutdown(socket.SHUT_RDWR)
             except OSError:
-                pass
+                pass  # ENOTCONN or already closed: nothing to shut down, close() still runs
             finally:
                 s.close()
 
@@ -1213,8 +1292,12 @@ class SSH:
 
 
 class KexDB:
+    """SSH2 algorithm notes: ``ALGORITHMS[type][name] = [versions, fail, warn, info]``."""
+
     # Ported verbatim from jtesta/ssh-audit v3.9.0 (commit dbf8b696331925ce7d4dbf72cb93faf3968397aa),
     # src/ssh_audit/ssh2_kexdb.py; refresh by re-porting that file, not by hand.
+    # One deliberate deviation: upstream lists WARN_EXPERIMENTAL for the two XMSS
+    # host keys in the fail slot, which printed a warning as [fail]; it is a warning here.
     # fmt: off
     FAIL_1024BIT_MODULUS = 'using small 1024-bit modulus'
     FAIL_3DES = 'using broken & deprecated 3DES cipher'
@@ -1466,8 +1549,8 @@ class KexDB:
             'ssh-rsa-sha256@ssh.com': [[]],
             'ssh-rsa-sha384@ssh.com': [[]],
             'ssh-rsa-sha512@ssh.com': [[]],
-            'ssh-xmss-cert-v01@openssh.com': [['7.7'], [WARN_EXPERIMENTAL]],
-            'ssh-xmss@openssh.com': [['7.7'], [WARN_EXPERIMENTAL]],
+            'ssh-xmss-cert-v01@openssh.com': [['7.7'], [], [WARN_EXPERIMENTAL]],
+            'ssh-xmss@openssh.com': [['7.7'], [], [WARN_EXPERIMENTAL]],
             'webauthn-sk-ecdsa-sha2-nistp256@openssh.com': [['8.3'], [FAIL_NSA_BACKDOORED_CURVE]],
             'webauthn-sk-ecdsa-sha2-nistp256-cert-v01@openssh.com': [['10.3'], [FAIL_NSA_BACKDOORED_CURVE]],
             'x509v3-ecdsa-sha2-1.3.132.0.10': [[], [FAIL_UNKNOWN]],
@@ -1673,6 +1756,11 @@ def version_key(version: str) -> tuple[int, ...]:
 
 
 def get_ssh_version(version_desc: str) -> tuple[str, str]:
+    """Decode an algorithm-DB version entry into (product, version).
+
+    ``d2013.62`` is Dropbear, ``l10.6.0`` is libssh 0.6.0 (the ``l1`` prefix
+    marks libssh; its versions all start at 0), anything else is OpenSSH.
+    """
     if version_desc.startswith('d'):
         return (SSH.Product.DropbearSSH, version_desc[1:])
     elif version_desc.startswith('l1'):
@@ -1721,14 +1809,17 @@ def get_alg_timeframe(
 def get_ssh_timeframe(
     alg_pairs: list[tuple[int, AlgorithmDB, list[tuple[str, list[str]]]]],
 ) -> dict[str, list[str | None]]:
+    """Per product, the newest 'since' and oldest 'removed' version over every offered algorithm.
+
+    Algorithms missing from the database are ignored: they carry no version data.
+    """
     timeframe: dict[str, list[str | None]] = {}
     for alg_pair in alg_pairs:
         alg_db = alg_pair[1]
         for alg_set in alg_pair[2]:
             alg_type, alg_list = alg_set
             for alg_name in alg_list:
-                alg_name_native = alg_name
-                alg_desc = alg_db[alg_type].get(alg_name_native)
+                alg_desc = alg_db[alg_type].get(alg_name)
                 if alg_desc is None:
                     continue
                 versions = alg_desc[0]
@@ -1737,6 +1828,7 @@ def get_ssh_timeframe(
 
 
 def get_alg_since_text(versions: list[str | None]) -> str | None:
+    """The 'available since' note for OpenSSH and Dropbear; libssh versions are left out of it."""
     tv = []
     if len(versions) == 0 or versions[0] is None:
         return None
@@ -1757,6 +1849,10 @@ def get_alg_since_text(versions: list[str | None]) -> str | None:
 def get_alg_pairs(
     kex: SSH2.Kex | None, pkm: SSH1.PublicKeyMessage | None
 ) -> list[tuple[int, AlgorithmDB, list[tuple[str, list[str]]]]]:
+    """(SSH version, database, [(type, offered names)]) for each protocol that was audited.
+
+    SSH2 uses the server-to-client lists: they are what the server itself offers.
+    """
     alg_pairs = []
     if pkm is not None:
         alg_pairs.append(
@@ -1882,6 +1978,7 @@ def get_alg_recommendations(
 def output_algorithms(
     title: str, alg_db: AlgorithmDB, alg_type: str, algorithms: list[str], maxlen: int
 ) -> None:
+    """Print one algorithm section; the title is printed only when a line survives the level filter."""
     with OutputBuffer() as obuf:
         for algorithm in algorithms:
             output_algorithm(alg_db, alg_type, algorithm, maxlen)
@@ -1892,14 +1989,18 @@ def output_algorithms(
 
 
 def output_algorithm(alg_db: AlgorithmDB, alg_type: str, alg_name: str, alg_max_len: int) -> None:
+    """Print an algorithm's notes, most severe first; the first line carries its colour level.
+
+    Later notes are continuations under the name unless verbose repeats it.
+    Names missing from the database are a warning: nothing vouches for them.
+    """
     prefix = '(' + alg_type + ') '
     padding = '' if out.batch else ' ' * (alg_max_len - len(alg_name))
     texts = []
     if len(alg_name.strip()) == 0:
         return
-    alg_name_native = alg_name
-    if alg_name_native in alg_db[alg_type]:
-        alg_desc = alg_db[alg_type][alg_name_native]
+    if alg_name in alg_db[alg_type]:
+        alg_desc = alg_db[alg_type][alg_name]
         ldesc = len(alg_desc)
         for idx, level in enumerate(['fail', 'warn', 'info']):
             if level == 'info':
@@ -1914,9 +2015,10 @@ def output_algorithm(alg_db: AlgorithmDB, alg_type: str, alg_name: str, alg_max_
             texts.append(('info', ''))
     else:
         texts.append(('warn', 'unknown algorithm'))
+    printers = {'fail': out.fail, 'warn': out.warn, 'info': out.info}
     first = True
     for level, text in texts:
-        f = getattr(out, level)
+        f = printers[level]
         text = '[' + level + '] ' + text
         if first:
             if first and level == 'info':
@@ -1932,6 +2034,11 @@ def output_algorithm(alg_db: AlgorithmDB, alg_type: str, alg_name: str, alg_max_
 
 
 def output_compatibility(kex: SSH2.Kex | None, pkm: SSH1.PublicKeyMessage | None) -> None:
+    """Print which OpenSSH/Dropbear versions support every offered algorithm.
+
+    When a removal predates the newest 'since' no single version supports
+    all of them, which is shown as ``X+ (some functionality from Y)``.
+    """
     alg_pairs = get_alg_pairs(kex, pkm)
     ssh_timeframe = get_ssh_timeframe(alg_pairs)
     comp_text = []
@@ -1977,8 +2084,19 @@ def output_recommendations(
     pkm: SSH1.PublicKeyMessage | None,
     padlen: int = 0,
 ) -> None:
+    """Print remove/append advice; a removal is [fail] when the algorithm has a fail note, else [warn]."""
     with OutputBuffer() as obuf:
         software, alg_rec = get_alg_recommendations(software, kex, pkm)
+        # Names to append come from the database, not the server, so they can be
+        # longer than every offered name that sized padlen; widen to fit them all.
+        names = [
+            n
+            for types in alg_rec.values()
+            for acts in types.values()
+            for a in acts.values()
+            for n in a
+        ]
+        padlen = max(padlen, *(len(n) + 1 for n in names), 0)
         for sshv in range(2, 0, -1):
             if sshv not in alg_rec:
                 continue
@@ -2012,10 +2130,13 @@ def output(
     kex: SSH2.Kex | None = None,
     pkm: SSH1.PublicKeyMessage | None = None,
 ) -> None:
+    """Print the full report; with only a banner and header (error path) just the general section."""
     sshv = 1 if pkm else 2
     with OutputBuffer() as obuf:
-        if len(header) > 0:
-            out.info('(gen) header: ' + '\n'.join(header))
+        # One prefixed line each: joined with newlines, every line after the first
+        # printed as bare server text that reads like an audit result.
+        for header_line in header:
+            out.info('(gen) header: ' + header_line)
         if banner is not None:
             out.good(f'(gen) banner: {banner}')
             if not banner.valid_ascii:
@@ -2042,7 +2163,8 @@ def output(
         out.sep()
 
     def ml(names: list[str]) -> int:
-        return max(len(i) for i in names)
+        """Longest name; 0 for an empty list, which an SSH1 server with no known cipher or auth bit sends."""
+        return max((len(i) for i in names), default=0)
 
     maxlen = 0
     if pkm is not None:
@@ -2102,6 +2224,12 @@ def parse_int(v: Any) -> int:
 
 
 def audit(aconf: AuditConf, sshv: int | None = None) -> None:
+    """Connect, read the banner and first packet, and print the report; any failure exits 1.
+
+    SSH2 is tried first unless only SSH1 was requested. A server that answers
+    the SSH2 banner with "Protocol major versions differ." is audited again
+    over SSH1 when SSH1 is allowed.
+    """
     out.batch = aconf.batch
     out.colors = aconf.colors
     out.verbose = aconf.verbose
@@ -2117,9 +2245,9 @@ def audit(aconf: AuditConf, sshv: int | None = None) -> None:
     # Closed before any SSH1 fallback reconnects, and on every sys.exit path.
     with SSH.Socket(aconf.host, aconf.port) as s:
         s.connect(aconf.ipvo)
-        banner, header = s.get_banner(sshv)
+        banner, header, reason = s.get_banner(sshv)
         if banner is None:
-            err = '[exception] did not receive banner.'
+            err = f'[exception] did not receive banner ({reason}).'
         else:
             packet_type, payload = s.read_packet(sshv)
     if err is None:
@@ -2177,8 +2305,12 @@ class Colors:
 
     @staticmethod
     def enabled(stream: TextIO) -> bool:
+        """Whether ``stream`` gets colour: a POSIX terminal and no non-empty ``NO_COLOR``.
+
+        An empty ``NO_COLOR`` keeps colour on, as no-color.org specifies.
+        """
         isatty = getattr(stream, 'isatty', None)
-        return os.name == 'posix' and 'NO_COLOR' not in os.environ and bool(isatty and isatty())
+        return os.name == 'posix' and not os.environ.get('NO_COLOR') and bool(isatty and isatty())
 
     @classmethod
     def paint(cls, level: str, text: str) -> str:
@@ -2190,4 +2322,14 @@ class Colors:
 out = Output()
 if __name__ == '__main__':
     conf = AuditConf.from_cmdline(sys.argv[1:], usage)
-    audit(conf)
+    try:
+        audit(conf)
+    except BrokenPipeError:
+        # The reader closed the pipe (`ssh-audit.py host | head`). The report is
+        # finished; leaving the broken stream in place makes the interpreter's
+        # final flush raise again and print a traceback over the user's output.
+        # A StringIO rather than devnull: nothing more is written, and an open
+        # file here would leak a descriptor and raise ResourceWarning.
+        sys.stdout = StringIO()
+        # 128 + SIGPIPE, the status a program killed by the signal would carry.
+        sys.exit(141)
