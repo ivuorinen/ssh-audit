@@ -111,7 +111,10 @@ Coverage must stay at 100% of statements, lines and branches of `ssh-audit.py`;
 `make coverage-html` writes a browsable report to `htmlcov/`.
 
 ## ChangeLog
-### Unreleased
+### v2.0.0 (2026-09-24)
+Breaking: requires Python 3.14 or newer, `-h` now exits 0, errors and
+command-line usage go to stderr, and banner-version CVE matching is gone.
+
  - recognize libssh servers, which announce themselves as `libssh_<version>`, not `libssh-<version>`
  - prefix every pre-banner header line with `(gen) header:`, so a server cannot forge report lines
  - exit quietly when the reader of a piped report closes it (`| head`), instead of a BrokenPipeError traceback
