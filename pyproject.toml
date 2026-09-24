@@ -1,0 +1,51 @@
+[project]
+name = "ssh-audit"
+version = "1.7.0"
+description = "SSH server auditing: banner, key exchange, algorithms, security information"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Andris Raugulis", email = "moo@arthepsy.eu" },
+  { name = "Ismo Vuorinen", email = "ismo@ivuorinen.net" },
+]
+classifiers = [
+  "Environment :: Console",
+  "Intended Audience :: System Administrators",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Security",
+]
+# ssh-audit.py is a single stdlib-only script; it must never gain runtime dependencies.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ivuorinen/ssh-audit"
+Issues = "https://github.com/ivuorinen/ssh-audit/issues"
+
+[tool.coverage.run]
+branch = true
+include = ["ssh-audit.py"]
+
+[tool.coverage.report]
+# 100% of statements and branches; a gap fails the run.
+fail_under = 100
+show_missing = true
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["ssh-audit.py"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP", "W"]
+# The algorithm and CVE tables are kept one entry per line for review diffs.
+ignore = ["E501"]
