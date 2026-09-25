@@ -25,7 +25,7 @@ from collections.abc import Callable, Iterable, Sequence
 from io import BytesIO, StringIO
 from typing import Any, NoReturn, TextIO
 
-VERSION = 'v1.7.0'
+VERSION = 'v2.0.0'
 
 # alg type -> alg name -> [versions, fail texts, warn texts, info texts]
 type AlgorithmDB = dict[str, dict[str, list[list[str | None]]]]
